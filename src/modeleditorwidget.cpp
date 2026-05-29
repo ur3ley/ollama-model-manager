@@ -198,31 +198,6 @@ void ModelEditorWidget::setupUI()
 
     form->addWidget(penaltyGroup);
 
-    m_reasoningGroup = new QGroupBox(tr("Рассуждения (think)"));
-    auto *reasoningLayout = new QHBoxLayout(m_reasoningGroup);
-    m_reasoningCheck = new QCheckBox(tr("Управлять рассуждениями"));
-    m_reasoningCheck->setToolTip(tr(
-        "Управляет режимом рассуждений (thinking) для моделей,\n"
-        "которые его поддерживают (например, DeepSeek-R1, Qwen, Gemma).\n"
-        "Отключите галочку, чтобы модель использовала свои настройки по умолчанию."
-    ));
-    reasoningLayout->addWidget(m_reasoningCheck);
-    m_reasoningCombo = new QComboBox();
-    m_reasoningCombo->addItems({"true", "false", "high", "medium", "low"});
-    m_reasoningCombo->setToolTip(tr(
-        "Уровень рассуждений:\n"
-        "  true — включено (по умолчанию)\n"
-        "  false — выключено\n"
-        "  high — высокое качество рассуждений\n"
-        "  medium — среднее\n"
-        "  low — минимальные рассуждения"
-    ));
-    m_reasoningCombo->setEnabled(false);
-    reasoningLayout->addWidget(m_reasoningCombo);
-    reasoningLayout->addStretch();
-    m_reasoningGroup->setVisible(true);
-    form->addWidget(m_reasoningGroup);
-
     auto *sysGroup = new QGroupBox(tr("Системный промпт"));
     auto *sysLayout = new QVBoxLayout(sysGroup);
 
@@ -292,10 +267,6 @@ void ModelEditorWidget::setupUI()
         m_systemPromptEdit->setEnabled(checked);
     });
 
-    connect(m_reasoningCheck, &QCheckBox::toggled, this, [this](bool checked) {
-        m_reasoningCombo->setEnabled(checked);
-    });
-
     connect(m_fromCombo, &QComboBox::currentTextChanged, this, &ModelEditorWidget::onFromChanged);
     connect(m_previewBtn, &QPushButton::clicked, this, &ModelEditorWidget::onPreview);
     connect(m_createBtn, &QPushButton::clicked, this, &ModelEditorWidget::onCreate);
@@ -349,14 +320,9 @@ void ModelEditorWidget::setCreateMode()
     m_systemPromptCheck->setChecked(false);
     m_systemPromptEdit->clear();
 
-    m_reasoningGroup->setVisible(true);
-    m_reasoningCheck->setChecked(false);
-    m_reasoningCombo->setCurrentText("true");
-
     m_defaultCtxLabel->clear();
     m_maxCtxLabel->clear();
     m_baseMaxContext = 32768;
-    m_baseCapabilities.clear();
     m_numCtxSpin->setMaximum(1048576);
 }
 
@@ -433,17 +399,6 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     if (params.parameters.contains("frequency_penalty"))
         m_frequencyPenaltySpin->setValue(params.parameters["frequency_penalty"].toDouble());
 
-    m_baseCapabilities = params.capabilities;
-    if (params.parameters.contains("think")) {
-        QString val = params.parameters["think"];
-        m_reasoningCheck->setChecked(true);
-        int idx = m_reasoningCombo->findText(val);
-        if (idx >= 0) m_reasoningCombo->setCurrentIndex(idx);
-    } else {
-        m_reasoningCheck->setChecked(false);
-        m_reasoningCombo->setCurrentText("true");
-    }
-
     bool hasSystem = !params.systemPrompt.isEmpty();
     m_systemPromptCheck->setChecked(hasSystem);
     if (hasSystem)
@@ -472,7 +427,6 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
         m_numCtxSpin->setMaximum(1048576);
-        m_baseCapabilities.clear();
         return;
     }
 
@@ -575,9 +529,6 @@ ModelfileBuilder::Config ModelEditorWidget::collectConfig()
 
     config.enableFrequencyPenalty = m_frequencyPenaltyCheck->isChecked();
     config.frequencyPenalty = m_frequencyPenaltySpin->value();
-
-    config.enableReasoning = m_reasoningCheck->isChecked();
-    config.reasonValue = m_reasoningCombo->currentText();
 
     config.enableSystemPrompt = m_systemPromptCheck->isChecked();
     config.systemPrompt = m_systemPromptEdit->toPlainText().trimmed();
