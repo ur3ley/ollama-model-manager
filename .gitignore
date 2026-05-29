@@ -1,0 +1,14 @@
+build/
+*.o
+*.d
+moc_*.cpp
+mocs_compilation.cpp
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+ollama-model-manager
+ollama-model-manager_autogen/
+*.a
+*.out
+*qt_folder_*
