@@ -1,9 +1,0 @@
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/ollama-model-manager.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/edit_cache.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/rebuild_cache.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/list_install_components.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/install.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/install/local.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/install/strip.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/ollama-model-manager_autogen_timestamp_deps.dir
-/home/oleksandr/projects/ollama-manager/build/CMakeFiles/ollama-model-manager_autogen.dir
