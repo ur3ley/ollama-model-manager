@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/oleksandr/projects/ollama-manager/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
