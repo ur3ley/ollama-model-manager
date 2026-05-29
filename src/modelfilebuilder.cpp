@@ -39,9 +39,6 @@ QString ModelfileBuilder::build(const Config &config)
     if (config.enableFrequencyPenalty) {
         result += "PARAMETER frequency_penalty " + QString::number(config.frequencyPenalty, 'f', 2) + "\n";
     }
-    if (config.enableReasoning) {
-        result += "PARAMETER think " + config.reasonValue + "\n";
-    }
 
     QMapIterator<QString, QString> it(config.extraParams);
     while (it.hasNext()) {

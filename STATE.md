@@ -9,13 +9,12 @@
 ## Current Status
 (2025-05-29)
 
-- Добавлен параметр `think` в редактор моделей (секция "Рассуждения") с выбором уровня: true/false/high/medium/low
-- Параметр `PARAMETER think` записывается в Modelfile при включенном чекбоксе
-- Секция видна всегда, независимо от модели
+- Параметр `think` в редакторе моделей **удалён** — Ollama 0.24 не поддерживает `PARAMETER think` в Modelfile
+- `--think false/high/medium/low` работает только как флаг `ollama run`, не как PARAMETER
 
 ## Known Issues
 
-- 
+- Невозможно управлять рассуждениями (reasoning/thinking) через Modelfile — только через `ollama run --think` или open-webui
 
 ## Key Paths
 

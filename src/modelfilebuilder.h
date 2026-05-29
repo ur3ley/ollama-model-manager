@@ -34,9 +34,6 @@ public:
         bool enableFrequencyPenalty = false;
         double frequencyPenalty = 0.0;
 
-        bool enableReasoning = false;
-        QString reasonValue = "true";
-
         bool enableSystemPrompt = false;
         QString systemPrompt;
 

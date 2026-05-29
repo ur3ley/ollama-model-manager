@@ -78,10 +78,6 @@ private:
     QCheckBox *m_systemPromptCheck;
     QPlainTextEdit *m_systemPromptEdit;
 
-    QGroupBox *m_reasoningGroup;
-    QCheckBox *m_reasoningCheck;
-    QComboBox *m_reasoningCombo;
-
     QPushButton *m_previewBtn;
     QPushButton *m_createBtn;
     QPushButton *m_updateBtn;
@@ -91,7 +87,6 @@ private:
     QString m_currentEditModel;
     QString m_fromBlob;  // direct blob path for updates, bypasses inheritance
     int m_baseMaxContext = 32768;
-    QStringList m_baseCapabilities;
 };
 
 #endif // MODELEDITORWIDGET_H
