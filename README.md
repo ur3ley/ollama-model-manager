@@ -10,19 +10,9 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 
 ## Screenshots
 
-> _Add a screenshot here, e.g. `docs/screenshot.png`._
+![Ollama Model Manager — main window](docs/screenshot-1.png)
 
-```
-+-------------------+--------------------------------------------+
-|  Model list       |  Model editor                              |
-|  - gemma3:12b     |  FROM: [ gemma3:12b            v]          |
-|  - llava:latest   |  Name: [ my-model:variant      ]          |
-|  - qwen2.5:7b     |  Context: [====slider====][ 128 ] K       |
-|                   |  temperature / top_p / top_k / penalties  |
-|  [New] [Import]   |  System prompt ...                         |
-|                   |  [Preview] [Create] [Update]              |
-+-------------------+--------------------------------------------+
-```
+![Ollama Model Manager — model editor](docs/screenshot-2.png)
 
 ---
 
