@@ -67,11 +67,18 @@ void ModelEditorWidget::setupUI()
     ));
     ctxRow->addWidget(m_numCtxCheck);
 
+    m_numCtxSlider = new QSlider(Qt::Horizontal);
+    m_numCtxSlider->setRange(2, 1024);
+    m_numCtxSlider->setSingleStep(1);
+    m_numCtxSlider->setPageStep(4);
+    m_numCtxSlider->setToolTip(tr("Быстрая настройка размера контекста (K)"));
+    ctxRow->addWidget(m_numCtxSlider, 7);
+
     m_numCtxSpin = new QSpinBox();
     m_numCtxSpin->setRange(2, 1024);
     m_numCtxSpin->setSingleStep(1);
     m_numCtxSpin->setToolTip(tr("Размер окна контекста в K (1K = 1024 токена)"));
-    ctxRow->addWidget(m_numCtxSpin, 1);
+    ctxRow->addWidget(m_numCtxSpin, 3);
 
     auto *ctxUnitLabel = new QLabel(tr("K"));
     ctxRow->addWidget(ctxUnitLabel);
@@ -250,6 +257,16 @@ void ModelEditorWidget::setupUI()
 
     connect(m_numCtxCheck, &QCheckBox::toggled, this, [this](bool checked) {
         m_numCtxSpin->setEnabled(checked);
+        m_numCtxSlider->setEnabled(checked);
+    });
+
+    connect(m_numCtxSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (m_numCtxSpin->value() != v)
+            m_numCtxSpin->setValue(v);
+    });
+    connect(m_numCtxSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        if (m_numCtxSlider->value() != v)
+            m_numCtxSlider->setValue(v);
     });
 
     auto connectCheckSpin = [this](QCheckBox *check, QWidget *spin) {
@@ -326,6 +343,7 @@ void ModelEditorWidget::setCreateMode()
     m_defaultCtxLabel->clear();
     m_maxCtxLabel->clear();
     m_baseMaxContext = 32768;
+    m_numCtxSlider->setMaximum(1024);
     m_numCtxSpin->setMaximum(1024);
 }
 
@@ -370,6 +388,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
 
     int maxK = (params.contextLength > 0) ? params.contextLength / 1024 : 1024;
     m_baseMaxContext = (params.contextLength > 0) ? params.contextLength : 32768;
+    m_numCtxSlider->setMaximum(maxK);
     m_numCtxSpin->setMaximum(maxK);
     setMaxCtxLabel(params.contextLength);
 
@@ -430,6 +449,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_defaultCtxLabel->clear();
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
+        m_numCtxSlider->setMaximum(1024);
         m_numCtxSpin->setMaximum(1024);
         return;
     }
@@ -437,6 +457,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
     int maxCtx = maxContextForBase(baseModel);
     if (maxCtx > 0) {
         m_baseMaxContext = maxCtx;
+        m_numCtxSlider->setMaximum(maxCtx / 1024);
         m_numCtxSpin->setMaximum(maxCtx / 1024);
         setMaxCtxLabel(maxCtx);
         if (m_numCtxSpin->value() > maxCtx / 1024)
@@ -444,6 +465,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
     } else {
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
+        m_numCtxSlider->setMaximum(1024);
         m_numCtxSpin->setMaximum(1024);
     }
 
