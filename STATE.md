@@ -7,13 +7,18 @@
 - Бинарник: `build/ollama-model-manager`
 
 ## Current Status
-(2025-05-29)
+(2026-07-08)
 
-- Параметр `think` в редакторе моделей **удалён** — Ollama 0.24 не поддерживает `PARAMETER think` в Modelfile
-- `--think false/high/medium/low` работает только как флаг `ollama run`, не как PARAMETER
+- Исправлена потеря мультимодальности (vision) при редактировании модели: FROM теперь
+  ссылается на имя модели, а не на blob весов → ollama наследует слой проектора
+- Параметр `think` в редакторе моделей удалён — Ollama 0.24 не поддерживает PARAMETER think/enable_thinking в Modelfile
+- `--think false/high/medium/low` работает только как флаг `ollama run` или через API/open-webui
+- opencode не пробрасывает `think` для Ollama-моделей (OpenAI-совместимый API)
+- Настроен git, STATE.md, HISTORY.md, JOURNAL.md, симлинк на бинарник
 
 ## Known Issues
 
+- FROM /blob (путь к blob) в Modelfile теряет проектор/TEMPLATE/RENDERER — использовать имя модели
 - Невозможно управлять рассуждениями (reasoning/thinking) через Modelfile — только через `ollama run --think` или open-webui
 
 ## Key Paths

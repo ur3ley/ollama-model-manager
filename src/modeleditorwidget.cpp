@@ -356,14 +356,14 @@ void ModelEditorWidget::loadModel(const QString &modelName)
             m_fromCombo->setCurrentIndex(idx);
         else
             m_fromCombo->setCurrentText(realFrom);
-    } else if (!m_fromBlob.isEmpty()) {
-        m_fromCombo->setCurrentText(m_fromBlob);
     } else if (!params.fromBase.isEmpty()) {
         int idx = m_fromCombo->findText(params.fromBase);
         if (idx >= 0)
             m_fromCombo->setCurrentIndex(idx);
         else
             m_fromCombo->setCurrentText(params.fromBase);
+    } else if (!m_fromBlob.isEmpty()) {
+        m_fromCombo->setCurrentText(m_fromBlob);
     }
     m_fromCombo->blockSignals(false);
 
