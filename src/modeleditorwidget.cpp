@@ -350,20 +350,18 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     }
 
     m_fromCombo->blockSignals(true);
-    if (!realFrom.isEmpty()) {
-        int idx = m_fromCombo->findText(realFrom);
+    QString baseFrom = modelName;
+    if (baseFrom.isEmpty()) {
+        if (!params.fromBase.isEmpty())      baseFrom = params.fromBase;
+        else if (!realFrom.isEmpty())        baseFrom = realFrom;
+        else                                 baseFrom = m_fromBlob;
+    }
+    if (!baseFrom.isEmpty()) {
+        int idx = m_fromCombo->findText(baseFrom);
         if (idx >= 0)
             m_fromCombo->setCurrentIndex(idx);
         else
-            m_fromCombo->setCurrentText(realFrom);
-    } else if (!params.fromBase.isEmpty()) {
-        int idx = m_fromCombo->findText(params.fromBase);
-        if (idx >= 0)
-            m_fromCombo->setCurrentIndex(idx);
-        else
-            m_fromCombo->setCurrentText(params.fromBase);
-    } else if (!m_fromBlob.isEmpty()) {
-        m_fromCombo->setCurrentText(m_fromBlob);
+            m_fromCombo->setCurrentText(baseFrom);
     }
     m_fromCombo->blockSignals(false);
 
@@ -413,9 +411,10 @@ void ModelEditorWidget::loadModel(const QString &modelName)
         m_numCtxSpin->setMaximum(1048576);
     }
 
+    setEditMode(modelName);
+
     updateContextInfo(m_fromCombo->currentText(), params.contextLength);
 
-    setEditMode(modelName);
     m_statusLabel->setText(tr("Загружено: %1 (%2, %3 параметров)")
         .arg(modelName, params.architecture, params.paramCount));
 }
