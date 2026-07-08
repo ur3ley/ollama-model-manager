@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QGroupBox>
 #include <QCheckBox>
+#include <QSlider>
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include "ollamacli.h"
@@ -58,6 +59,7 @@ private:
     QLabel *m_maxCtxLabel;
 
     QCheckBox *m_numCtxCheck;
+    QSlider *m_numCtxSlider;
     QSpinBox *m_numCtxSpin;
 
     QCheckBox *m_tempCheck;
