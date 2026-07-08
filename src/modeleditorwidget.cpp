@@ -59,19 +59,22 @@ void ModelEditorWidget::setupUI()
     m_numCtxCheck = new QCheckBox(tr("num_ctx:"));
     m_numCtxCheck->setChecked(true);
     m_numCtxCheck->setToolTip(tr(
-        "Размер окна контекста в токенах.\n"
+        "Размер окна контекста в тысячах токенов (K = 1024).\n"
         "Определяет, сколько предыдущих токенов\n"
         "модель «видит» при генерации ответа.\n"
         "Больше = длиннее диалог, но больше памяти.\n"
-        "Типичные значения: 4096, 8192, 32768, 131072."
+        "Типичные значения: 4K, 8K, 32K, 128K."
     ));
     ctxRow->addWidget(m_numCtxCheck);
 
     m_numCtxSpin = new QSpinBox();
-    m_numCtxSpin->setRange(512, 1048576);
-    m_numCtxSpin->setSingleStep(512);
-    m_numCtxSpin->setToolTip(tr("Размер окна контекста в токенах"));
+    m_numCtxSpin->setRange(2, 1024);
+    m_numCtxSpin->setSingleStep(1);
+    m_numCtxSpin->setToolTip(tr("Размер окна контекста в K (1K = 1024 токена)"));
     ctxRow->addWidget(m_numCtxSpin, 1);
+
+    auto *ctxUnitLabel = new QLabel(tr("K"));
+    ctxRow->addWidget(ctxUnitLabel);
     ctxLayout->addLayout(ctxRow);
 
     m_defaultCtxLabel = new QLabel();
@@ -300,7 +303,7 @@ void ModelEditorWidget::setCreateMode()
     m_statusLabel->setText(tr("Создание новой модели"));
 
     m_numCtxCheck->setChecked(true);
-    m_numCtxSpin->setValue(32768);
+    m_numCtxSpin->setValue(32);
 
     m_tempCheck->setChecked(false);
     m_tempSpin->setValue(0.70);
@@ -323,7 +326,7 @@ void ModelEditorWidget::setCreateMode()
     m_defaultCtxLabel->clear();
     m_maxCtxLabel->clear();
     m_baseMaxContext = 32768;
-    m_numCtxSpin->setMaximum(1048576);
+    m_numCtxSpin->setMaximum(1024);
 }
 
 void ModelEditorWidget::setEditMode(const QString &modelName)
@@ -367,7 +370,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
 
     m_numCtxCheck->setChecked(params.parameters.contains("num_ctx"));
     if (params.parameters.contains("num_ctx"))
-        m_numCtxSpin->setValue(params.parameters["num_ctx"].toInt());
+        m_numCtxSpin->setValue(qRound(params.parameters["num_ctx"].toInt() / 1024.0));
 
     m_tempCheck->setChecked(params.parameters.contains("temperature"));
     if (params.parameters.contains("temperature"))
@@ -405,10 +408,10 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     setMaxCtxLabel(params.contextLength);
     if (params.contextLength > 0) {
         m_baseMaxContext = params.contextLength;
-        m_numCtxSpin->setMaximum(params.contextLength);
+        m_numCtxSpin->setMaximum(params.contextLength / 1024);
     } else {
         m_baseMaxContext = 32768;
-        m_numCtxSpin->setMaximum(1048576);
+        m_numCtxSpin->setMaximum(1024);
     }
 
     setEditMode(modelName);
@@ -425,21 +428,21 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_defaultCtxLabel->clear();
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
-        m_numCtxSpin->setMaximum(1048576);
+        m_numCtxSpin->setMaximum(1024);
         return;
     }
 
     int maxCtx = maxContextForBase(baseModel);
     if (maxCtx > 0) {
         m_baseMaxContext = maxCtx;
-        m_numCtxSpin->setMaximum(maxCtx);
+        m_numCtxSpin->setMaximum(maxCtx / 1024);
         setMaxCtxLabel(maxCtx);
-        if (m_numCtxSpin->value() > maxCtx)
-            m_numCtxSpin->setValue(maxCtx);
+        if (m_numCtxSpin->value() > maxCtx / 1024)
+            m_numCtxSpin->setValue(maxCtx / 1024);
     } else {
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
-        m_numCtxSpin->setMaximum(1048576);
+        m_numCtxSpin->setMaximum(1024);
     }
 
     updateContextInfo(baseModel, maxCtx);
@@ -447,7 +450,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
 
 void ModelEditorWidget::onNumCtxChanged(int value)
 {
-    if (m_baseMaxContext > 0 && value > m_baseMaxContext)
+    if (m_baseMaxContext > 0 && value * 1024 > m_baseMaxContext)
         m_numCtxSpin->setStyleSheet("QSpinBox { color: red; }");
     else
         m_numCtxSpin->setStyleSheet("");
@@ -506,7 +509,7 @@ ModelfileBuilder::Config ModelEditorWidget::collectConfig()
     config.from = m_fromCombo->currentText().trimmed();
 
     config.enableNumCtx = m_numCtxCheck->isChecked();
-    config.numCtx = m_numCtxSpin->value();
+    config.numCtx = m_numCtxSpin->value() * 1024;
 
     config.enableTemperature = m_tempCheck->isChecked();
     config.temperature = m_tempSpin->value();
