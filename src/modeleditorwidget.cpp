@@ -17,12 +17,12 @@ void ModelEditorWidget::setupUI()
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(8, 8, 8, 8);
 
-    auto *title = new QLabel(tr("Редактор модели"));
-    QFont boldFont = title->font();
+    m_titleLabel = new QLabel();
+    QFont boldFont = m_titleLabel->font();
     boldFont.setBold(true);
     boldFont.setPointSize(boldFont.pointSize() + 2);
-    title->setFont(boldFont);
-    mainLayout->addWidget(title);
+    m_titleLabel->setFont(boldFont);
+    mainLayout->addWidget(m_titleLabel);
 
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
@@ -31,57 +31,41 @@ void ModelEditorWidget::setupUI()
     auto *scrollWidget = new QWidget();
     auto *form = new QVBoxLayout(scrollWidget);
 
-    auto *modelGroup = new QGroupBox(tr("Модель"));
-    auto *modelLayout = new QFormLayout(modelGroup);
+    m_modelGroup = new QGroupBox();
+    m_modelLayout = new QFormLayout(m_modelGroup);
 
     m_fromCombo = new QComboBox();
     m_fromCombo->setEditable(true);
-    m_fromCombo->setToolTip(tr(
-        "Базовая модель, от которой наследуются все параметры.\n"
-        "Выберите из списка установленных или введите имя вручную\n"
-        "(например, для модели из реестра Ollama)."
-    ));
-    modelLayout->addRow(tr("FROM:"), m_fromCombo);
+    m_modelLayout->addRow(QString(), m_fromCombo);
 
     m_nameEdit = new QLineEdit();
-    m_nameEdit->setPlaceholderText(tr("напр. my-model:variant"));
-    m_nameEdit->setToolTip(tr("Имя новой модели"));
     m_nameEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._/:\\-]*"), m_nameEdit));
-    modelLayout->addRow(tr("Имя:"), m_nameEdit);
+    m_modelLayout->addRow(QString(), m_nameEdit);
 
-    form->addWidget(modelGroup);
+    form->addWidget(m_modelGroup);
 
-    auto *ctxGroup = new QGroupBox(tr("Контекст"));
-    auto *ctxLayout = new QVBoxLayout(ctxGroup);
+    m_ctxGroup = new QGroupBox();
+    auto *ctxLayout = new QVBoxLayout(m_ctxGroup);
 
     auto *ctxRow = new QHBoxLayout();
-    m_numCtxCheck = new QCheckBox(tr("num_ctx:"));
+    m_numCtxCheck = new QCheckBox();
     m_numCtxCheck->setChecked(true);
-    m_numCtxCheck->setToolTip(tr(
-        "Размер окна контекста в тысячах токенов (K = 1024).\n"
-        "Определяет, сколько предыдущих токенов\n"
-        "модель «видит» при генерации ответа.\n"
-        "Больше = длиннее диалог, но больше памяти.\n"
-        "Типичные значения: 4K, 8K, 32K, 128K."
-    ));
     ctxRow->addWidget(m_numCtxCheck);
 
     m_numCtxSlider = new QSlider(Qt::Horizontal);
     m_numCtxSlider->setRange(2, 1024);
     m_numCtxSlider->setSingleStep(1);
     m_numCtxSlider->setPageStep(4);
-    m_numCtxSlider->setToolTip(tr("Быстрая настройка размера контекста (K)"));
     ctxRow->addWidget(m_numCtxSlider, 7);
 
     m_numCtxSpin = new QSpinBox();
     m_numCtxSpin->setRange(2, 1024);
     m_numCtxSpin->setSingleStep(1);
-    m_numCtxSpin->setToolTip(tr("Размер окна контекста в K (1K = 1024 токена)"));
     ctxRow->addWidget(m_numCtxSpin, 3);
 
-    auto *ctxUnitLabel = new QLabel(tr("K"));
-    ctxRow->addWidget(ctxUnitLabel);
+    m_ctxUnitLabel = new QLabel();
+    ctxRow->addWidget(m_ctxUnitLabel);
     ctxLayout->addLayout(ctxRow);
 
     m_defaultCtxLabel = new QLabel();
@@ -92,138 +76,92 @@ void ModelEditorWidget::setupUI()
     m_maxCtxLabel->setStyleSheet("color: #666; font-size: 11px; padding-left: 4px;");
     ctxLayout->addWidget(m_maxCtxLabel);
 
-    form->addWidget(ctxGroup);
+    form->addWidget(m_ctxGroup);
 
-    auto *sampleGroup = new QGroupBox(tr("Семплирование"));
-    auto *sampleGrid = new QGridLayout(sampleGroup);
+    m_sampleGroup = new QGroupBox();
+    auto *sampleGrid = new QGridLayout(m_sampleGroup);
 
-    m_tempCheck = new QCheckBox(tr("temperature:"));
+    m_tempCheck = new QCheckBox();
     sampleGrid->addWidget(m_tempCheck, 0, 0);
     m_tempSpin = new QDoubleSpinBox();
     m_tempSpin->setRange(0.0, 5.0);
     m_tempSpin->setSingleStep(0.05);
     m_tempSpin->setDecimals(2);
     m_tempSpin->setEnabled(false);
-    m_tempSpin->setToolTip(tr(
-        "Температура (temperature) — управляет случайностью ответов.\n"
-        "0.0 = строго детерминированные ответы (хорошо для кода/фактов).\n"
-        "0.5–0.7 = сбалансированная креативность.\n"
-        "1.0+ = высокая случайность, творческие ответы.\n"
-        "Выше 1.5 = может генерировать бессвязный текст."
-    ));
     sampleGrid->addWidget(m_tempSpin, 0, 1);
 
-    m_topPCheck = new QCheckBox(tr("top_p:"));
+    m_topPCheck = new QCheckBox();
     sampleGrid->addWidget(m_topPCheck, 0, 2);
     m_topPSpin = new QDoubleSpinBox();
     m_topPSpin->setRange(0.0, 1.0);
     m_topPSpin->setSingleStep(0.05);
     m_topPSpin->setDecimals(2);
     m_topPSpin->setEnabled(false);
-    m_topPSpin->setToolTip(tr(
-        "top_p (nucleus sampling) — порог накопленной вероятности.\n"
-        "Модель выбирает из токенов, чья суммарная вероятность ≤ top_p.\n"
-        "0.9 = рассматриваются токены, дающие 90% вероятности.\n"
-        "Ниже = более предсказуемо. 1.0 = без ограничения."
-    ));
     sampleGrid->addWidget(m_topPSpin, 0, 3);
 
-    m_topKCheck = new QCheckBox(tr("top_k:"));
+    m_topKCheck = new QCheckBox();
     sampleGrid->addWidget(m_topKCheck, 1, 0);
     m_topKSpin = new QSpinBox();
     m_topKSpin->setRange(1, 200);
     m_topKSpin->setEnabled(false);
-    m_topKSpin->setToolTip(tr(
-        "top_k — ограничивает выбор K наиболее вероятными токенами.\n"
-        "40 = модель выбирает только из 40 самых вероятных токенов.\n"
-        "Ниже = более консервативные ответы.\n"
-        "Выше = больше разнообразия."
-    ));
     sampleGrid->addWidget(m_topKSpin, 1, 1);
 
-    m_repeatPenaltyCheck = new QCheckBox(tr("repeat_penalty:"));
+    m_repeatPenaltyCheck = new QCheckBox();
     sampleGrid->addWidget(m_repeatPenaltyCheck, 1, 2);
     m_repeatPenaltySpin = new QDoubleSpinBox();
     m_repeatPenaltySpin->setRange(0.0, 2.0);
     m_repeatPenaltySpin->setSingleStep(0.05);
     m_repeatPenaltySpin->setDecimals(2);
     m_repeatPenaltySpin->setEnabled(false);
-    m_repeatPenaltySpin->setToolTip(tr(
-        "repeat_penalty — штраф за повторение токенов.\n"
-        "1.0 = без штрафа. > 1.0 = снижает вероятность\n"
-        "уже использованных токенов. Помогает избежать\n"
-        "зацикливания и повторений в ответах."
-    ));
     sampleGrid->addWidget(m_repeatPenaltySpin, 1, 3);
 
-    m_repeatLastNCheck = new QCheckBox(tr("repeat_last_n:"));
+    m_repeatLastNCheck = new QCheckBox();
     sampleGrid->addWidget(m_repeatLastNCheck, 2, 0);
     m_repeatLastNSpin = new QSpinBox();
     m_repeatLastNSpin->setRange(0, 2048);
     m_repeatLastNSpin->setEnabled(false);
-    m_repeatLastNSpin->setToolTip(tr(
-        "repeat_last_n — на сколько токенов назад смотреть\n"
-        "при проверке повторений (для repeat_penalty).\n"
-        "64 = проверять последние 64 токена.\n"
-        "0 = смотреть на всю историю."
-    ));
     sampleGrid->addWidget(m_repeatLastNSpin, 2, 1);
 
-    form->addWidget(sampleGroup);
+    form->addWidget(m_sampleGroup);
 
-    auto *penaltyGroup = new QGroupBox(tr("Штрафы"));
-    auto *penaltyGrid = new QGridLayout(penaltyGroup);
+    m_penaltyGroup = new QGroupBox();
+    auto *penaltyGrid = new QGridLayout(m_penaltyGroup);
 
-    m_presencePenaltyCheck = new QCheckBox(tr("presence_penalty:"));
+    m_presencePenaltyCheck = new QCheckBox();
     penaltyGrid->addWidget(m_presencePenaltyCheck, 0, 0);
     m_presencePenaltySpin = new QDoubleSpinBox();
     m_presencePenaltySpin->setRange(-2.0, 2.0);
     m_presencePenaltySpin->setSingleStep(0.05);
     m_presencePenaltySpin->setDecimals(2);
     m_presencePenaltySpin->setEnabled(false);
-    m_presencePenaltySpin->setToolTip(tr(
-        "presence_penalty — штраф за уже встречавшиеся токены.\n"
-        "Положительное значение = модель реже повторяет\n"
-        "уже сказанное, побуждая к новым темам.\n"
-        "Отрицательное = модель чаще возвращается\n"
-        "к уже упомянутым темам (больше связности)."
-    ));
     penaltyGrid->addWidget(m_presencePenaltySpin, 0, 1);
 
-    m_frequencyPenaltyCheck = new QCheckBox(tr("frequency_penalty:"));
+    m_frequencyPenaltyCheck = new QCheckBox();
     penaltyGrid->addWidget(m_frequencyPenaltyCheck, 0, 2);
     m_frequencyPenaltySpin = new QDoubleSpinBox();
     m_frequencyPenaltySpin->setRange(-2.0, 2.0);
     m_frequencyPenaltySpin->setSingleStep(0.05);
     m_frequencyPenaltySpin->setDecimals(2);
     m_frequencyPenaltySpin->setEnabled(false);
-    m_frequencyPenaltySpin->setToolTip(tr(
-        "frequency_penalty — штраф, пропорциональный\n"
-        "частоте токена в тексте. Сильнее давит на частые\n"
-        "слова, чем presence_penalty.\n"
-        "Положительное = меньше повторений слов.\n"
-        "Отрицательное = больше повторений."
-    ));
     penaltyGrid->addWidget(m_frequencyPenaltySpin, 0, 3);
 
-    form->addWidget(penaltyGroup);
+    form->addWidget(m_penaltyGroup);
 
-    auto *sysGroup = new QGroupBox(tr("Системный промпт"));
-    auto *sysLayout = new QVBoxLayout(sysGroup);
+    m_sysGroup = new QGroupBox();
+    auto *sysLayout = new QVBoxLayout(m_sysGroup);
 
     auto *sysHeader = new QHBoxLayout();
-    m_systemPromptCheck = new QCheckBox(tr("Включить системный промпт"));
+    m_systemPromptCheck = new QCheckBox();
     sysHeader->addWidget(m_systemPromptCheck);
     sysHeader->addStretch();
     sysLayout->addLayout(sysHeader);
 
     m_systemPromptEdit = new QPlainTextEdit();
-    m_systemPromptEdit->setPlaceholderText(tr("Необязательный системный промпт..."));
     m_systemPromptEdit->setMaximumHeight(180);
     m_systemPromptEdit->setEnabled(false);
     sysLayout->addWidget(m_systemPromptEdit);
 
-    form->addWidget(sysGroup);
+    form->addWidget(m_sysGroup);
 
     form->addStretch();
 
@@ -231,22 +169,18 @@ void ModelEditorWidget::setupUI()
     mainLayout->addWidget(scrollArea, 1);
 
     auto *btnLayout = new QHBoxLayout();
-    m_previewBtn = new QPushButton(tr("Предпросмотр"));
-    m_previewBtn->setToolTip(tr("Показать сгенерированный Modelfile без создания модели"));
+    m_previewBtn = new QPushButton();
     btnLayout->addWidget(m_previewBtn);
 
-    m_createBtn = new QPushButton(tr("Создать модель"));
+    m_createBtn = new QPushButton();
     m_createBtn->setStyleSheet("QPushButton { font-weight: bold; }");
-    m_createBtn->setToolTip(tr("Создать новую модель с этими параметрами"));
     btnLayout->addWidget(m_createBtn);
 
-    m_updateBtn = new QPushButton(tr("Обновить модель"));
-    m_updateBtn->setToolTip(tr("Пересоздать текущую модель с новыми параметрами"));
+    m_updateBtn = new QPushButton();
     m_updateBtn->setVisible(false);
     btnLayout->addWidget(m_updateBtn);
 
-    m_clearBtn = new QPushButton(tr("Очистить"));
-    m_clearBtn->setToolTip(tr("Сбросить все поля"));
+    m_clearBtn = new QPushButton();
     btnLayout->addWidget(m_clearBtn);
 
     mainLayout->addLayout(btnLayout);
@@ -294,6 +228,61 @@ void ModelEditorWidget::setupUI()
     connect(m_clearBtn, &QPushButton::clicked, this, &ModelEditorWidget::setCreateMode);
     connect(m_numCtxSpin, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &ModelEditorWidget::onNumCtxChanged);
+
+    retranslateUi();
+    connect(I18n::instance(), &I18n::languageChanged, this, &ModelEditorWidget::retranslateUi);
+}
+
+void ModelEditorWidget::retranslateUi()
+{
+    m_titleLabel->setText(T("editor.title"));
+
+    m_modelGroup->setTitle(T("editor.modelGroup"));
+    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_fromCombo)))
+        l->setText(T("editor.from"));
+    m_fromCombo->setToolTip(T("editor.fromTip"));
+    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_nameEdit)))
+        l->setText(T("editor.name"));
+    m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
+    m_nameEdit->setToolTip(T("editor.nameTip"));
+
+    m_ctxGroup->setTitle(T("editor.ctxGroup"));
+    m_numCtxCheck->setText(T("editor.numCtx"));
+    m_numCtxCheck->setToolTip(T("editor.numCtxTip"));
+    m_numCtxSlider->setToolTip(T("editor.sliderTip"));
+    m_numCtxSpin->setToolTip(T("editor.spinTip"));
+    m_ctxUnitLabel->setText(T("editor.kUnit"));
+
+    m_sampleGroup->setTitle(T("editor.sampleGroup"));
+    m_tempCheck->setText(T("editor.temp"));
+    m_tempSpin->setToolTip(T("editor.tempTip"));
+    m_topPCheck->setText(T("editor.topP"));
+    m_topPSpin->setToolTip(T("editor.topPTip"));
+    m_topKCheck->setText(T("editor.topK"));
+    m_topKSpin->setToolTip(T("editor.topKTip"));
+    m_repeatPenaltyCheck->setText(T("editor.repeatPenalty"));
+    m_repeatPenaltySpin->setToolTip(T("editor.repeatPenaltyTip"));
+    m_repeatLastNCheck->setText(T("editor.repeatLastN"));
+    m_repeatLastNSpin->setToolTip(T("editor.repeatLastNTip"));
+
+    m_penaltyGroup->setTitle(T("editor.penaltyGroup"));
+    m_presencePenaltyCheck->setText(T("editor.presencePenalty"));
+    m_presencePenaltySpin->setToolTip(T("editor.presencePenaltyTip"));
+    m_frequencyPenaltyCheck->setText(T("editor.frequencyPenalty"));
+    m_frequencyPenaltySpin->setToolTip(T("editor.frequencyPenaltyTip"));
+
+    m_sysGroup->setTitle(T("editor.sysGroup"));
+    m_systemPromptCheck->setText(T("editor.sysEnable"));
+    m_systemPromptEdit->setPlaceholderText(T("editor.sysPlaceholder"));
+
+    m_previewBtn->setText(T("editor.preview"));
+    m_previewBtn->setToolTip(T("editor.previewTip"));
+    m_createBtn->setText(T("editor.create"));
+    m_createBtn->setToolTip(T("editor.createTip"));
+    m_updateBtn->setText(T("editor.update"));
+    m_updateBtn->setToolTip(T("editor.updateTip"));
+    m_clearBtn->setText(T("editor.clear"));
+    m_clearBtn->setToolTip(T("editor.clearTip"));
 }
 
 void ModelEditorWidget::setAvailableModels(const QStringList &models)
@@ -317,7 +306,7 @@ void ModelEditorWidget::setCreateMode()
     m_updateBtn->setVisible(false);
     m_nameEdit->setReadOnly(false);
     m_nameEdit->clear();
-    m_statusLabel->setText(tr("Создание новой модели"));
+    m_statusLabel->setText(T("editor.statusCreate"));
 
     m_numCtxCheck->setChecked(true);
     m_numCtxSpin->setValue(32);
@@ -353,7 +342,7 @@ void ModelEditorWidget::setEditMode(const QString &modelName)
     m_createBtn->setVisible(false);
     m_updateBtn->setVisible(true);
     m_nameEdit->setText(modelName);
-    m_statusLabel->setText(tr("Редактирование: %1").arg(modelName));
+    m_statusLabel->setText(T("editor.statusEdit").arg(modelName));
 }
 
 void ModelEditorWidget::loadModel(const QString &modelName)
@@ -364,7 +353,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     QString realFrom = m_cli->findOtherModelSharingBlob(m_fromBlob, modelName);
 
     if (params.architecture.isEmpty()) {
-        m_statusLabel->setText(tr("Ошибка загрузки: %1").arg(modelName));
+        m_statusLabel->setText(T("editor.statusLoadError").arg(modelName));
         m_defaultCtxLabel->clear();
         m_maxCtxLabel->clear();
         return;
@@ -439,7 +428,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
 
     updateContextInfo(m_fromCombo->currentText(), params.contextLength);
 
-    m_statusLabel->setText(tr("Загружено: %1 (%2, %3 параметров)")
+    m_statusLabel->setText(T("editor.statusLoaded")
         .arg(modelName, params.architecture, params.paramCount));
 }
 
@@ -484,12 +473,12 @@ void ModelEditorWidget::onPreview()
 {
     auto config = collectConfig();
     if (config.from.isEmpty()) {
-        QMessageBox::warning(this, tr("Предупреждение"), tr("Выберите базовую модель (FROM)."));
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
         return;
     }
     QString content = ModelfileBuilder::build(config);
     QMessageBox msgBox(this);
-    msgBox.setWindowTitle(tr("Предпросмотр Modelfile"));
+    msgBox.setWindowTitle(T("editor.previewTitle"));
     msgBox.setText(content);
     msgBox.setDetailedText(content);
     msgBox.exec();
@@ -499,12 +488,12 @@ void ModelEditorWidget::onCreate()
 {
     auto config = collectConfig();
     if (config.from.isEmpty()) {
-        QMessageBox::warning(this, tr("Предупреждение"), tr("Выберите базовую модель (FROM)."));
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
         return;
     }
     QString name = m_nameEdit->text().trimmed();
     if (name.isEmpty()) {
-        QMessageBox::warning(this, tr("Предупреждение"), tr("Введите имя модели."));
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnName"));
         return;
     }
     QString content = ModelfileBuilder::build(config);
@@ -517,7 +506,7 @@ void ModelEditorWidget::onUpdate()
 
     auto config = collectConfig();
     if (config.from.isEmpty()) {
-        QMessageBox::warning(this, tr("Предупреждение"), tr("Выберите базовую модель (FROM)."));
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
         return;
     }
     QString name = m_nameEdit->text().trimmed();
@@ -606,7 +595,7 @@ void ModelEditorWidget::updateContextInfo(const QString &baseModel, int loadedCo
 void ModelEditorWidget::setDefaultCtxLabel(int defaultCtx)
 {
     if (defaultCtx > 0) {
-        m_defaultCtxLabel->setText(tr("По умолчанию у базовой модели: %1 токенов (%2K)")
+        m_defaultCtxLabel->setText(T("editor.defaultCtx")
             .arg(defaultCtx).arg(defaultCtx / 1024));
     } else {
         m_defaultCtxLabel->clear();
@@ -616,7 +605,7 @@ void ModelEditorWidget::setDefaultCtxLabel(int defaultCtx)
 void ModelEditorWidget::setMaxCtxLabel(int maxCtx)
 {
     if (maxCtx > 0) {
-        m_maxCtxLabel->setText(tr("Аппаратный максимум: %1 токенов (%2K)")
+        m_maxCtxLabel->setText(T("editor.maxCtx")
             .arg(maxCtx).arg(maxCtx / 1024));
     } else {
         m_maxCtxLabel->clear();

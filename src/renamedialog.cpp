@@ -3,6 +3,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QRegularExpressionValidator>
+#include "i18n.h"
 
 RenameDialog::RenameDialog(const QString &oldName, const QStringList &existingModels,
                            QWidget *parent)
@@ -13,20 +14,20 @@ RenameDialog::RenameDialog(const QString &oldName, const QStringList &existingMo
 
 void RenameDialog::setupUI(const QString &oldName)
 {
-    setWindowTitle(tr("Переименование модели"));
+    setWindowTitle(T("rename.title"));
     setMinimumWidth(400);
 
     auto *layout = new QVBoxLayout(this);
 
-    auto *infoLabel = new QLabel(tr("Переименование: <b>%1</b>").arg(oldName));
+    auto *infoLabel = new QLabel(T("rename.info").arg(oldName));
     layout->addWidget(infoLabel);
 
     auto *formLayout = new QFormLayout();
     m_nameEdit = new QLineEdit();
-    m_nameEdit->setPlaceholderText(tr("Введите новое имя..."));
+    m_nameEdit->setPlaceholderText(T("rename.placeholder"));
     m_nameEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._/:\\-]*"), m_nameEdit));
-    formLayout->addRow(tr("Новое имя:"), m_nameEdit);
+    formLayout->addRow(T("rename.newName"), m_nameEdit);
     layout->addLayout(formLayout);
 
     m_warningLabel = new QLabel();
@@ -38,9 +39,9 @@ void RenameDialog::setupUI(const QString &oldName)
 
     auto *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
-    m_cancelBtn = new QPushButton(tr("Отмена"));
+    m_cancelBtn = new QPushButton(T("common.cancel"));
     btnLayout->addWidget(m_cancelBtn);
-    m_renameBtn = new QPushButton(tr("Переименовать"));
+    m_renameBtn = new QPushButton(T("rename.rename"));
     m_renameBtn->setEnabled(false);
     m_renameBtn->setStyleSheet("QPushButton { font-weight: bold; }");
     btnLayout->addWidget(m_renameBtn);
@@ -57,7 +58,7 @@ void RenameDialog::onTextChanged(const QString &text)
     bool exists = m_existingModels.contains(text.trimmed());
 
     if (exists) {
-        m_warningLabel->setText(tr("Внимание: модель с таким именем уже существует."));
+        m_warningLabel->setText(T("rename.exists"));
         m_warningLabel->setVisible(true);
         valid = false;
     } else {

@@ -5,6 +5,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Runtime localization** — plain `.ini` key‑value files in `languages/` folder.
+  `en.ini` (English, base & fallback) and `ru.ini` (Russian) included.
+  Adding a language requires no recompilation: copy a file, translate it,
+  restart — the new language appears in the **Language** menu automatically.
+  Language choice is remembered via `QSettings`.
+- `_HOWTO.txt` in `languages/` with instructions for contributors.
+
+### Changed
+- All UI strings moved from hard‑coded `tr(...)` to `T("key")` → `languages/*.ini`.
+  Main window, model list, model editor, GGUF import dialog and rename dialog
+  all support live retranslation via `retranslateUi()`.
+
 ### Fixed
 - **Multimodality (vision) loss when editing a model.** Rebuilding a model now
   references it by name in `FROM` instead of the raw weights blob path, so the

@@ -7,6 +7,7 @@
 #include <QGroupBox>
 #include <QMessageBox>
 #include <QRegularExpressionValidator>
+#include "i18n.h"
 
 GGUFImportDialog::GGUFImportDialog(QWidget *parent)
     : QDialog(parent)
@@ -16,31 +17,31 @@ GGUFImportDialog::GGUFImportDialog(QWidget *parent)
 
 void GGUFImportDialog::setupUI()
 {
-    setWindowTitle(tr("Импорт GGUF"));
+    setWindowTitle(T("gguf.title"));
     setMinimumWidth(480);
 
     auto *layout = new QVBoxLayout(this);
 
-    auto *fileGroup = new QGroupBox(tr("GGUF-файл"));
+    auto *fileGroup = new QGroupBox(T("gguf.fileGroup"));
     auto *fileLayout = new QHBoxLayout(fileGroup);
     m_pathEdit = new QLineEdit();
-    m_pathEdit->setPlaceholderText(tr("Путь к .gguf-файлу..."));
+    m_pathEdit->setPlaceholderText(T("gguf.pathPlaceholder"));
     m_pathEdit->setReadOnly(true);
     fileLayout->addWidget(m_pathEdit);
-    m_browseBtn = new QPushButton(tr("Обзор..."));
+    m_browseBtn = new QPushButton(T("gguf.browse"));
     fileLayout->addWidget(m_browseBtn);
     layout->addWidget(fileGroup);
 
-    auto *nameGroup = new QGroupBox(tr("Имя модели"));
+    auto *nameGroup = new QGroupBox(T("gguf.nameGroup"));
     auto *nameLayout = new QFormLayout(nameGroup);
     m_nameEdit = new QLineEdit();
-    m_nameEdit->setPlaceholderText(tr("напр. my-model:latest"));
+    m_nameEdit->setPlaceholderText(T("gguf.namePlaceholder"));
     m_nameEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._/:\\-]*"), m_nameEdit));
-    nameLayout->addRow(tr("Имя:"), m_nameEdit);
+    nameLayout->addRow(T("gguf.name"), m_nameEdit);
     layout->addWidget(nameGroup);
 
-    auto *previewGroup = new QGroupBox(tr("Предпросмотр Modelfile"));
+    auto *previewGroup = new QGroupBox(T("gguf.previewGroup"));
     auto *previewLayout = new QVBoxLayout(previewGroup);
     m_previewLabel = new QLabel();
     previewLayout->addWidget(m_previewLabel);
@@ -52,9 +53,9 @@ void GGUFImportDialog::setupUI()
 
     auto *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
-    m_cancelBtn = new QPushButton(tr("Отмена"));
+    m_cancelBtn = new QPushButton(T("common.cancel"));
     btnLayout->addWidget(m_cancelBtn);
-    m_createBtn = new QPushButton(tr("Создать модель"));
+    m_createBtn = new QPushButton(T("gguf.create"));
     m_createBtn->setStyleSheet("QPushButton { font-weight: bold; }");
     m_createBtn->setEnabled(false);
     btnLayout->addWidget(m_createBtn);
@@ -68,9 +69,9 @@ void GGUFImportDialog::setupUI()
 
 void GGUFImportDialog::onBrowse()
 {
-    QString path = QFileDialog::getOpenFileName(this, tr("Выберите GGUF-файл"),
+    QString path = QFileDialog::getOpenFileName(this, T("gguf.chooseFile"),
                                                  QString(),
-                                                 tr("GGUF-файлы (*.gguf);;Все файлы (*)"));
+                                                 T("gguf.fileFilter"));
     if (!path.isEmpty()) {
         m_pathEdit->setText(path);
 
@@ -99,10 +100,10 @@ void GGUFImportDialog::updatePreview()
     if (ready) {
         QString modelfile = "FROM " + path + "\n";
         m_previewEdit->setPlainText(modelfile);
-        m_previewLabel->setText(tr("Модель будет создана как: %1").arg(name));
+        m_previewLabel->setText(T("gguf.willCreate").arg(name));
     } else {
         m_previewEdit->clear();
-        m_previewLabel->setText(tr("Выберите GGUF-файл и введите имя"));
+        m_previewLabel->setText(T("gguf.selectHint"));
     }
 }
 

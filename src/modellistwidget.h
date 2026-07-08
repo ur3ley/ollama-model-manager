@@ -7,7 +7,9 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QProcess>
+#include <QLabel>
 #include "ollamacli.h"
+#include "i18n.h"
 
 class ModelListWidget : public QWidget
 {
@@ -36,13 +38,16 @@ private slots:
 
 private:
     void setupUI();
+    void retranslateUi();
     void populateList(const QList<OllamaCli::ModelInfo> &models);
 
     OllamaCli *m_cli;
     QTreeWidget *m_tree;
     QLineEdit *m_filterEdit;
+    QLabel *m_title;
     QPushButton *m_refreshBtn;
     QPushButton *m_newBtn;
+    QPushButton *m_importBtn;
     QPushButton *m_deleteBtn;
 };
 
