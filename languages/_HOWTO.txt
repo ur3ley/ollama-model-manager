@@ -1,0 +1,58 @@
+How to add a new language
+=========================
+
+Ollama Model Manager loads all UI text from ".ini" files in this folder.
+Adding a language does NOT require rebuilding the application.
+
+Steps
+-----
+
+1. Copy "en.ini" (the English base file) to a new file named after the
+   language code, e.g.:
+
+       et.ini   (Estonian)
+       de.ini   (German)
+       fr.ini   (French)
+       es.ini   (Spanish)
+
+   Use a short language code as the file name. It will be used internally.
+
+2. Open your new file in any text editor and:
+
+   - Change the display name shown in the Language menu:
+
+         [meta]
+         name = Eesti
+
+   - Translate the text on the RIGHT side of each "key = value" line.
+     Do NOT change the keys (the part before "=") or the [section] headers.
+
+3. Keep these special tokens exactly as they are:
+
+   - %1, %2, %3   → placeholders replaced at runtime (names, numbers, etc.)
+   - \n           → line break (used in tooltips and messages)
+   - HTML like <b>...</b> in some strings
+
+4. Save the file as UTF-8.
+
+5. Restart the application. Your language will appear automatically in the
+   "Language" menu (built by scanning this folder).
+
+Notes
+-----
+
+- English (en.ini) is the base and the fallback. If a key is missing or
+  empty in your file, the English text is shown instead, so a partial
+  translation still works.
+- Lines starting with "#" or ";" are comments and are ignored.
+- The first "=" on a line separates the key from the value. Values may
+  themselves contain "=" characters (e.g. "0.0 = deterministic").
+
+Example (excerpt)
+-----------------
+
+    [menu]
+    file = &File          ->  file = &Fail
+    newModel = &New model ->  newModel = &Uus mudel
+
+That's it — copy, translate, save, restart.

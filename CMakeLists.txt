@@ -16,6 +16,7 @@ set(SOURCES
     src/modelfilebuilder.cpp
     src/ggufimportdialog.cpp
     src/renamedialog.cpp
+    src/i18n.cpp
 )
 
 set(HEADERS
@@ -26,6 +27,7 @@ set(HEADERS
     src/modelfilebuilder.h
     src/ggufimportdialog.h
     src/renamedialog.h
+    src/i18n.h
 )
 
 add_executable(ollama-model-manager ${SOURCES} ${HEADERS})
@@ -33,3 +35,4 @@ add_executable(ollama-model-manager ${SOURCES} ${HEADERS})
 target_link_libraries(ollama-model-manager PRIVATE Qt6::Widgets Qt6::Core)
 
 install(TARGETS ollama-model-manager RUNTIME DESTINATION bin)
+install(DIRECTORY languages/ DESTINATION share/ollama-model-manager/languages)

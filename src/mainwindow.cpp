@@ -11,6 +11,8 @@
 #include <QTemporaryFile>
 #include <QDir>
 #include <QFileInfo>
+#include <QSettings>
+#include "i18n.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -18,34 +20,36 @@ MainWindow::MainWindow(QWidget *parent)
     m_cli = new OllamaCli(this);
     setupUI();
     setupMenuBar();
+    retranslateUi();
+    connect(I18n::instance(), &I18n::languageChanged, this, &MainWindow::retranslateUi);
     checkOllamaAvailable();
 
     connect(m_cli, &OllamaCli::createFinished, this, [this](bool success, const QString &output) {
         if (success) {
-            statusBar()->showMessage(tr("Модель создана."), 5000);
+            statusBar()->showMessage(T("status.created"), 5000);
         } else {
-            QMessageBox::warning(this, tr("Ошибка"),
-                                 tr("Не удалось создать модель:\n%1").arg(output));
+            QMessageBox::warning(this, T("error.title"),
+                                 T("error.createFailed").arg(output));
         }
         onRefreshAll();
     });
 
     connect(m_cli, &OllamaCli::deleteFinished, this, [this](bool success, const QString &output) {
         if (success) {
-            statusBar()->showMessage(tr("Модель удалена."), 3000);
+            statusBar()->showMessage(T("status.deleted"), 3000);
         } else {
-            QMessageBox::warning(this, tr("Ошибка"),
-                                 tr("Не удалось удалить модель:\n%1").arg(output));
+            QMessageBox::warning(this, T("error.title"),
+                                 T("error.deleteFailed").arg(output));
         }
         onRefreshAll();
     });
 
     connect(m_cli, &OllamaCli::copyFinished, this, [this](bool success, const QString &output) {
         if (success) {
-            statusBar()->showMessage(tr("Модель переименована."), 3000);
+            statusBar()->showMessage(T("status.renamed"), 3000);
         } else {
-            QMessageBox::warning(this, tr("Ошибка"),
-                                 tr("Не удалось переименовать модель:\n%1").arg(output));
+            QMessageBox::warning(this, T("error.title"),
+                                 T("error.renameFailed").arg(output));
         }
         onRefreshAll();
     });
@@ -93,39 +97,73 @@ void MainWindow::setupUI()
 
 void MainWindow::setupMenuBar()
 {
-    auto *fileMenu = menuBar()->addMenu(tr("&Файл"));
+    m_fileMenu = menuBar()->addMenu(QString());
 
-    auto *newAction = fileMenu->addAction(tr("&Новая модель"), this, &MainWindow::onNewModel);
-    newAction->setShortcut(QKeySequence("Ctrl+N"));
+    m_newAction = m_fileMenu->addAction(QString(), this, &MainWindow::onNewModel);
+    m_newAction->setShortcut(QKeySequence("Ctrl+N"));
 
-    auto *importAction = fileMenu->addAction(tr("&Импорт GGUF..."), this, &MainWindow::onImportGGUF);
-    importAction->setShortcut(QKeySequence("Ctrl+I"));
+    m_importAction = m_fileMenu->addAction(QString(), this, &MainWindow::onImportGGUF);
+    m_importAction->setShortcut(QKeySequence("Ctrl+I"));
 
-    fileMenu->addSeparator();
+    m_fileMenu->addSeparator();
 
-    auto *refreshAction = fileMenu->addAction(tr("&Обновить"), this, &MainWindow::onRefreshAll);
-    refreshAction->setShortcut(QKeySequence("F5"));
+    m_refreshAction = m_fileMenu->addAction(QString(), this, &MainWindow::onRefreshAll);
+    m_refreshAction->setShortcut(QKeySequence("F5"));
 
-    fileMenu->addSeparator();
+    m_fileMenu->addSeparator();
 
-    auto *quitAction = fileMenu->addAction(tr("&Выход"), qApp, &QApplication::quit);
-    quitAction->setShortcut(QKeySequence("Ctrl+Q"));
+    m_quitAction = m_fileMenu->addAction(QString(), qApp, &QApplication::quit);
+    m_quitAction->setShortcut(QKeySequence("Ctrl+Q"));
 
-    auto *helpMenu = menuBar()->addMenu(tr("&Справка"));
-    helpMenu->addAction(tr("&О программе"), this, [this]() {
-        QMessageBox::about(this, tr("О программе"),
-                           tr("Ollama Model Manager v1.0\n\n"
-                              "Управление моделями Ollama.\n"
-                              "Создание, редактирование, переименование, импорт GGUF."));
+    m_languageMenu = menuBar()->addMenu(QString());
+    m_langGroup = new QActionGroup(this);
+    m_langGroup->setExclusive(true);
+    buildLanguageMenu();
+
+    m_helpMenu = menuBar()->addMenu(QString());
+    m_aboutAction = m_helpMenu->addAction(QString(), this, [this]() {
+        QMessageBox::about(this, T("about.title"), T("about.text"));
     });
+}
+
+void MainWindow::buildLanguageMenu()
+{
+    m_languageMenu->clear();
+    const QString current = I18n::instance()->currentCode();
+    const QStringList codes = I18n::instance()->availableCodes();
+    for (const QString &code : codes) {
+        QAction *act = m_languageMenu->addAction(I18n::instance()->displayName(code));
+        act->setCheckable(true);
+        act->setChecked(code == current);
+        act->setData(code);
+        m_langGroup->addAction(act);
+        connect(act, &QAction::triggered, this, [this, code]() {
+            if (I18n::instance()->setLanguage(code)) {
+                QSettings().setValue("language", code);
+            }
+        });
+    }
+}
+
+void MainWindow::retranslateUi()
+{
+    setWindowTitle(T("app.title"));
+    m_fileMenu->setTitle(T("menu.file"));
+    m_newAction->setText(T("menu.newModel"));
+    m_importAction->setText(T("menu.importGguf"));
+    m_refreshAction->setText(T("menu.refresh"));
+    m_quitAction->setText(T("menu.quit"));
+    m_languageMenu->setTitle(T("menu.language"));
+    m_helpMenu->setTitle(T("menu.help"));
+    m_aboutAction->setText(T("menu.about"));
 }
 
 void MainWindow::checkOllamaAvailable()
 {
     if (!m_cli->isAvailable()) {
-        statusBar()->showMessage(tr("Внимание: ollama не найден в PATH"));
+        statusBar()->showMessage(T("status.ollamaMissing"));
     } else {
-        statusBar()->showMessage(tr("Ollama найден: %1").arg(m_cli->ollamaPath()));
+        statusBar()->showMessage(T("status.ollamaFound").arg(m_cli->ollamaPath()));
     }
 }
 
@@ -156,18 +194,13 @@ void MainWindow::onDeleteModel(const QString &modelName)
     QMessageBox::Icon icon = QMessageBox::Question;
 
     if (refCount > 1) {
-        message = tr("Удалить \"%1\"?\n\n"
-                     "На этот blob ссылается ещё %n модель(ей). "
-                     "Будет удалён только этот псевдоним — данные модели сохранятся.",
-                     nullptr, refCount - 1).arg(modelName);
+        message = T("delete.shared").arg(modelName).arg(refCount - 1);
     } else {
         icon = QMessageBox::Warning;
-        message = tr("Удалить \"%1\"?\n\n"
-                     "ВНИМАНИЕ: это ПОСЛЕДНЯЯ ссылка на данные модели.\n"
-                     "Файлы модели (blobs) будут БЕЗВОЗВРАТНО УДАЛЕНЫ!").arg(modelName);
+        message = T("delete.last").arg(modelName);
     }
 
-    int ret = QMessageBox(icon, tr("Удаление модели"), message, buttons, this).exec();
+    int ret = QMessageBox(icon, T("delete.title"), message, buttons, this).exec();
     if (ret == QMessageBox::Yes) {
         m_cli->deleteModelAsync(modelName);
     }
@@ -200,27 +233,26 @@ void MainWindow::onCreateModel(const QString &name, const QString &modelfileCont
 {
     QString path = writeTempModelfile(modelfileContent);
     if (path.isEmpty()) {
-        QMessageBox::warning(this, tr("Ошибка"), tr("Не удалось записать временный Modelfile."));
+        QMessageBox::warning(this, T("error.title"), T("error.tmpModelfile"));
         return;
     }
-    statusBar()->showMessage(tr("Создание модели: %1...").arg(name));
+    statusBar()->showMessage(T("status.creating").arg(name));
     m_cli->createModelAsync(name, path);
 }
 
 void MainWindow::onUpdateModel(const QString &name, const QString &modelfileContent)
 {
-    int ret = QMessageBox::question(this, tr("Обновление модели"),
-                                     tr("Пересоздать модель \"%1\" с новыми параметрами?\n"
-                                        "Существующая модель будет перезаписана.").arg(name),
+    int ret = QMessageBox::question(this, T("update.title"),
+                                     T("update.confirm").arg(name),
                                      QMessageBox::Yes | QMessageBox::No,
                                      QMessageBox::No);
     if (ret == QMessageBox::Yes) {
         QString path = writeTempModelfile(modelfileContent);
         if (path.isEmpty()) {
-            QMessageBox::warning(this, tr("Ошибка"), tr("Не удалось записать временный Modelfile."));
+            QMessageBox::warning(this, T("error.title"), T("error.tmpModelfile"));
             return;
         }
-        statusBar()->showMessage(tr("Обновление модели: %1...").arg(name));
+        statusBar()->showMessage(T("status.updating").arg(name));
         m_cli->createModelAsync(name, path);
     }
 }

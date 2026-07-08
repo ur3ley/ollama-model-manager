@@ -16,6 +16,7 @@
 #include <QFormLayout>
 #include "ollamacli.h"
 #include "modelfilebuilder.h"
+#include "i18n.h"
 
 class ModelEditorWidget : public QWidget
 {
@@ -44,6 +45,7 @@ private slots:
 
 private:
     void setupUI();
+    void retranslateUi();
     void clearForm();
     int maxContextForBase(const QString &baseModel);
     void updateContextInfo(const QString &baseModel, int loadedContextLength);
@@ -52,6 +54,15 @@ private:
     void toggleParamEnabled(QCheckBox *check, QWidget *widget);
 
     OllamaCli *m_cli;
+
+    QLabel *m_titleLabel;
+    QGroupBox *m_modelGroup;
+    QFormLayout *m_modelLayout;
+    QGroupBox *m_ctxGroup;
+    QLabel *m_ctxUnitLabel;
+    QGroupBox *m_sampleGroup;
+    QGroupBox *m_penaltyGroup;
+    QGroupBox *m_sysGroup;
 
     QComboBox *m_fromCombo;
     QLineEdit *m_nameEdit;

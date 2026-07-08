@@ -29,6 +29,7 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 - **Rename** (via `ollama cp`) and **delete**, with awareness of shared weight blobs (warns before deleting the last reference).
 - **Import GGUF** — turn a local `.gguf` file into an Ollama model.
 - **Capability‑safe edits** — vision projector and template layers are inherited, not lost.
+- **Localization** — runtime-loaded `.ini` language files (English & Russian included); add a language by dropping a file in `languages/`.
 
 ---
 
@@ -91,7 +92,26 @@ sudo cmake --install build
 
 Keyboard shortcuts: `Ctrl+N` new model · `Ctrl+I` import GGUF · `F5` refresh · `Ctrl+Q` quit.
 
-> The user interface is currently in **Russian**.
+> The interface language can be changed at runtime via the **Language** menu.
+
+---
+
+## Localization
+
+The UI text lives in plain `.ini` files under `languages/`, one file per
+language named by its code (`en.ini`, `ru.ini`, `et.ini`, …). English
+(`en.ini`) is the base and the fallback.
+
+Adding a language requires **no recompilation**:
+
+1. Copy `languages/en.ini` to `languages/<code>.ini`.
+2. Set the display name under `[meta] name = …` and translate the right-hand
+   side of each `key = value` line (keep keys, `%1`/`%2` placeholders and `\n`).
+3. Save as UTF-8 and restart — the language appears automatically in the
+   **Language** menu, which is built by scanning the folder.
+
+See [`languages/_HOWTO.txt`](languages/_HOWTO.txt) for full instructions.
+The chosen language is remembered between sessions.
 
 ---
 

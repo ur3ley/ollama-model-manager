@@ -4,9 +4,13 @@
 #include <QMainWindow>
 #include <QSplitter>
 #include <QTemporaryFile>
+#include <QMenu>
+#include <QAction>
+#include <QActionGroup>
 #include "ollamacli.h"
 #include "modellistwidget.h"
 #include "modeleditorwidget.h"
+#include "i18n.h"
 
 class MainWindow : public QMainWindow
 {
@@ -27,6 +31,8 @@ private slots:
 private:
     void setupUI();
     void setupMenuBar();
+    void buildLanguageMenu();
+    void retranslateUi();
     void checkOllamaAvailable();
 
     QString writeTempModelfile(const QString &content);
@@ -35,6 +41,16 @@ private:
     ModelListWidget *m_listWidget;
     ModelEditorWidget *m_editorWidget;
     QSplitter *m_splitter;
+
+    QMenu *m_fileMenu;
+    QMenu *m_languageMenu;
+    QMenu *m_helpMenu;
+    QAction *m_newAction;
+    QAction *m_importAction;
+    QAction *m_refreshAction;
+    QAction *m_quitAction;
+    QAction *m_aboutAction;
+    QActionGroup *m_langGroup;
 };
 
 #endif // MAINWINDOW_H
