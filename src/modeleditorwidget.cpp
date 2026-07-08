@@ -368,9 +368,20 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     }
     m_fromCombo->blockSignals(false);
 
+    int maxK = (params.contextLength > 0) ? params.contextLength / 1024 : 1024;
+    m_baseMaxContext = (params.contextLength > 0) ? params.contextLength : 32768;
+    m_numCtxSpin->setMaximum(maxK);
+    setMaxCtxLabel(params.contextLength);
+
     m_numCtxCheck->setChecked(params.parameters.contains("num_ctx"));
-    if (params.parameters.contains("num_ctx"))
-        m_numCtxSpin->setValue(qRound(params.parameters["num_ctx"].toInt() / 1024.0));
+    if (params.parameters.contains("num_ctx")) {
+        int wantK = qRound(params.parameters["num_ctx"].toInt() / 1024.0);
+        m_numCtxSpin->setValue(wantK);
+        if (wantK > maxK)
+            m_numCtxSpin->setStyleSheet("QSpinBox { color: red; }");
+        else
+            m_numCtxSpin->setStyleSheet("");
+    }
 
     m_tempCheck->setChecked(params.parameters.contains("temperature"));
     if (params.parameters.contains("temperature"))
@@ -404,15 +415,6 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     m_systemPromptCheck->setChecked(hasSystem);
     if (hasSystem)
         m_systemPromptEdit->setPlainText(params.systemPrompt);
-
-    setMaxCtxLabel(params.contextLength);
-    if (params.contextLength > 0) {
-        m_baseMaxContext = params.contextLength;
-        m_numCtxSpin->setMaximum(params.contextLength / 1024);
-    } else {
-        m_baseMaxContext = 32768;
-        m_numCtxSpin->setMaximum(1024);
-    }
 
     setEditMode(modelName);
 
