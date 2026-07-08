@@ -12,7 +12,7 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 
 ![Ollama Model Manager — main window](docs/screenshot-1.png)
 
-![Ollama Model Manager — model editor](docs/screenshot-2.png)
+![Ollama Model Manager — editor scrolled down to the system prompt and actions](docs/screenshot-2.png)
 
 ---
 
