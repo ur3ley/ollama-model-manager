@@ -12,3 +12,10 @@ ollama-model-manager_autogen/
 *.a
 *.out
 *qt_folder_*
+
+# Internal AI-session / working notes (kept local, not published)
+STATE.md
+HISTORY.md
+JOURNAL.md
+NOTES.md
+tasks/
