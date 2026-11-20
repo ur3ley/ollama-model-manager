@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QDir>
 #include <QTextStream>
+#include <QDebug>
 
 I18n *I18n::instance()
 {
@@ -44,8 +45,11 @@ QString I18n::displayName(const QString &code) const
 bool I18n::setLanguage(const QString &code)
 {
     QHash<QString, QString> map = parseIni(m_dir + "/" + code + ".ini");
-    if (map.isEmpty())
+    if (map.isEmpty()) {
+        qWarning("i18n: не удалось загрузить %s (язык не установлен)",
+                 qPrintable(m_dir + "/" + code + ".ini"));
         return false;
+    }
     m_current = map;
     m_code = code;
     emit languageChanged();
@@ -67,8 +71,10 @@ QHash<QString, QString> I18n::parseIni(const QString &path)
 {
     QHash<QString, QString> map;
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qWarning("i18n: не удалось загрузить %s (%s)", qPrintable(path), qPrintable(file.errorString()));
         return map;
+    }
 
     QTextStream in(&file);
     in.setEncoding(QStringConverter::Utf8);

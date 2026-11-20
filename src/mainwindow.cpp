@@ -2,9 +2,14 @@
 #include "ggufimportdialog.h"
 #include "renamedialog.h"
 #include "modelfilebuilder.h"
+#include "proxydialog.h"
+#include "proxyservice.h"
+#include "tokenmanager.h"
+#include "tokendialog.h"
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
+#include <QCloseEvent>
 #include <QMessageBox>
 #include <QStatusBar>
 #include <QApplication>
@@ -14,10 +19,14 @@
 #include <QSettings>
 #include "i18n.h"
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *parent)
     : QMainWindow(parent)
+    , m_cli(new OllamaCli(this))
+    , m_tokens(tokens)
+    , m_proxy(service)
 {
-    m_cli = new OllamaCli(this);
+    if (!m_tokens)
+        m_tokens = new TokenManager(this);
     setupUI();
     setupMenuBar();
     retranslateUi();
@@ -120,6 +129,11 @@ void MainWindow::setupMenuBar()
     m_langGroup->setExclusive(true);
     buildLanguageMenu();
 
+    m_toolsMenu = menuBar()->addMenu(QString());
+    m_tokensAction = m_toolsMenu->addAction(QString(), this, &MainWindow::onManageTokens);
+    m_tokensAction->setShortcut(QKeySequence("Ctrl+T"));
+    m_proxyAction = m_toolsMenu->addAction(QString(), this, &MainWindow::showProxyDialog);
+
     m_helpMenu = menuBar()->addMenu(QString());
     m_aboutAction = m_helpMenu->addAction(QString(), this, [this]() {
         QMessageBox::about(this, T("about.title"), T("about.text"));
@@ -154,6 +168,9 @@ void MainWindow::retranslateUi()
     m_refreshAction->setText(T("menu.refresh"));
     m_quitAction->setText(T("menu.quit"));
     m_languageMenu->setTitle(T("menu.language"));
+    m_toolsMenu->setTitle(T("menu.tools"));
+    m_tokensAction->setText(T("menu.tokens"));
+    m_proxyAction->setText(T("menu.proxy"));
     m_helpMenu->setTitle(T("menu.help"));
     m_aboutAction->setText(T("menu.about"));
 }
@@ -176,6 +193,36 @@ void MainWindow::onRefreshAll()
 void MainWindow::onModelSelected(const QString &modelName)
 {
     m_editorWidget->loadModel(modelName);
+}
+
+void MainWindow::showTokensDialog()
+{
+    TokenDialog dialog(m_tokens, this);
+    dialog.exec();
+}
+
+void MainWindow::showProxyDialog()
+{
+    ProxyDialog dialog(m_proxy, this);
+    dialog.exec();
+}
+
+void MainWindow::onManageTokens()
+{
+    showTokensDialog();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // Крестик/Alt+F4 при живом трее — прячем окно: прокси продолжает работать,
+    // выход только через «Выход» в меню или трее.
+    if (m_hideOnClose) {
+        hide();
+        event->ignore();
+        emit hiddenToTray();
+        return;
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::onNewModel()

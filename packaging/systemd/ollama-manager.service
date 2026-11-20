@@ -1,0 +1,44 @@
+[Unit]
+Description=Ollama Model Manager (auth proxy, headless)
+Documentation=man:ollama-model-manager(1)
+After=network.target
+# Restart=on-failure без StartLimit* зацикливал бы падения бесконечно.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# PATH нужен и env, и приложению (openssl/lego для TLS-ротации).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# cmake --install кладёт бинарь в ${prefix}/bin (обычно /usr/local/bin),
+# поэтому не хардкодим путь: /usr/bin/env ищет его по PATH выше.
+ExecStart=/usr/bin/env ollama-model-manager --no-tray
+Restart=on-failure
+RestartSec=3
+# Ключи и токены не должны попадать в core dump; новые файлы — только для владельца.
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Даём запись только на ~/.config (он существует всегда). Подкаталог
+# ~/.config/ollama-manager создаст само приложение: ReadWritePaths на ещё
+# не существующий путь даёт 226/NAMESPACE на fresh install.
+ReadWritePaths=%h/.config
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+# KWallet общается с kwalletd по D-Bus/AF_UNIX. AF_NETLINK нужен Qt, чтобы
+# перечислить сетевые интерфейсы (QNetworkInterface) при пустом config.ini.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=default.target

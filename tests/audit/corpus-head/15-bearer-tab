@@ -1,0 +1,4 @@
+GET / HTTP/1.1
+Host: t
+Authorization: Bearer	secret-token-1
+
