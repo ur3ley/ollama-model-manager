@@ -1,0 +1,7 @@
+GET / HTTst: t
+Authorization: Bearer a
+Authorization: P/1.1
+Host: t
+Authorization: Bearer a
+Authorization: Bearer secret-token-1
+

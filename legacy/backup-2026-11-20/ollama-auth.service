@@ -1,0 +1,15 @@
+[Unit]
+Description=Ollama token-auth proxy (Bearer/X-API-Key → 11434)
+After=network-online.target
+Wants=network-online.target ollama-auth-tokens.service
+After=ollama-auth-tokens.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/podman start ollama-auth
+ExecStop=/usr/bin/podman stop -t 3 ollama-auth
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

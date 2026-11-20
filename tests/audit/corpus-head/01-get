@@ -1,0 +1,5 @@
+GET /api/tags HTTP/1.1
+Host: proxy.test
+Authorization: Bearer secret-token-1
+Connection: keep-alive
+

@@ -1,0 +1,9 @@
+[Unit]
+Description=Ollama API tokens: KDE Wallet → nginx maps
+Documentation=file:%h/projects/ollama-manager/scripts/ollama-tokens-sync.py
+Before=ollama-auth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/projects/ollama-manager/scripts/ollama-tokens-sync.py --reload
+TimeoutStartSec=60

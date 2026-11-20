@@ -30,14 +30,22 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 - **Import GGUF** — turn a local `.gguf` file into an Ollama model.
 - **Capability‑safe edits** — vision projector and template layers are inherited, not lost.
 - **Localization** — runtime-loaded `.ini` language files (English & Russian included); add a language by dropping a file in `languages/`.
+- **API tokens + built-in auth proxy** — issue and revoke one token per device (laptop, phone, …)
+  from **Tools → API tokens…**. Tokens live **only in KDE Wallet** and are checked by the proxy
+  inside this application: they are never written to disk, and revocation takes effect on the very
+  next request.
+- **Daemon & tray** — optionally runs in the background with a tray icon, proxying Ollama on the
+  LAN while the GUI window stays hidden.
 
 ---
 
 ## Requirements
 
 - [Ollama](https://ollama.com) installed and available in `PATH`
-- **Qt 6** (Widgets, Core)
+- **Qt 6** (Widgets, Core, Network)
+- **KDE Frameworks 6 — KWallet** (`KF6::Wallet`, plus `extra-cmake-modules`) for the token manager
 - **CMake ≥ 3.16**
+- **OpenSSL** CLI (≥ 3.0) at runtime — used to generate and renew the internal CA/certificate
 - A C++17 compiler (GCC / Clang)
 
 On Debian/Ubuntu:
@@ -55,7 +63,7 @@ sudo dnf install gcc-c++ cmake qt6-qtbase-devel
 On Arch:
 
 ```bash
-sudo pacman -S base-devel cmake qt6-base
+sudo pacman -S base-devel cmake qt6-base kwallet extra-cmake-modules
 ```
 
 ---
@@ -95,6 +103,81 @@ Keyboard shortcuts: `Ctrl+N` new model · `Ctrl+I` import GGUF · `F5` refresh �
 > The interface language can be changed at runtime via the **Language** menu.
 
 ---
+
+## Built-in auth proxy
+
+The manager itself can act as a token-checking reverse proxy in front of Ollama. It replaces the
+earlier nginx + podman container (archived in [`legacy/`](legacy/)): no Python script, no tmpfs
+snippet, no container reload — tokens are read from KDE Wallet into process memory and looked up
+by SHA-256, so plaintext tokens never leave the wallet.
+
+Two listen modes (**Settings → Proxy**):
+
+| Mode | Address | Port |
+|---|---|---|
+| Selected interfaces | one or more concrete interface addresses | may be the same as Ollama's (`11434`) |
+| All interfaces | `0.0.0.0` | must differ from Ollama's port (default `11435`) |
+
+The reason is a kernel rule: `0.0.0.0:P` cannot be bound while Ollama holds `127.0.0.1:P`, whereas
+`192.168.1.2:P` can. Loopback is never bound, so local clients (`ollama` CLI, the manager itself)
+keep talking to Ollama directly, without a token.
+
+Daemon mode:
+
+```bash
+ollama-model-manager --daemon --listen 192.168.1.2:11434
+ollama-model-manager --daemon --listen 0.0.0.0:11435
+ollama-model-manager --show     # raise the window of a running instance
+```
+
+Streaming is preserved byte-for-byte (`/api/chat` NDJSON, `/v1` SSE). Full architecture, limits and
+the migration/rollback procedure: [`docs/proxy.md`](docs/proxy.md).
+
+### TLS on the internal hop
+
+The OPNsense → host leg can be encrypted as well. The default mode is an **internal CA**:
+
+- a 10‑year Root CA is generated once (`~/.config/ollama-manager/tls/`, mode 0700/0600);
+- a 90‑day leaf certificate (`SAN IP:192.168.1.2`, `DNS:ollama.ur3ley.dedyn.io`) is renewed
+  automatically 30 days before expiry;
+- import **only the CA** into OPNsense once (*TLS: Trusted Certificate*), leave
+  *Verify Certificate* on — leaf renewals need no further imports.
+
+Alternative modes: your own cert/key files, or a publicly trusted Let's Encrypt certificate
+obtained via deSEC DNS‑01 (`lego`). Keys never leave `~/.config/ollama-manager/tls/`.
+
+### Security
+
+- Tokens never touch disk; they are compared as SHA-256 hashes, so a timing attack cannot
+  recover them character by character.
+- Request limits: 100 MiB body (counted by actual bytes, chunked included), 32 KiB and 100
+  headers, 8 KiB URI, 256 connections (0 = deny all), 10 s header timeout, bidirectional
+  backpressure at 4/1 MiB.
+- Control characters and obs-fold are rejected; hop-by-hop headers (including those named in
+  `Connection`) are stripped; device names are validated before use.
+- Parser fuzzed with >4.5 million libFuzzer iterations under ASan/UBSan (zero crashes).
+- A hardened systemd unit is shipped in `packaging/systemd/`.
+
+## API tokens
+
+| Piece | Value |
+|---|---|
+| Wallet | `kdewallet`, folder `ollama-auth` |
+| Keys | `<device>` = token, `created:<device>` = ISO-8601 date |
+| Token format | 24 random bytes → 48 hex characters |
+| Endpoint | `https://ollama.ur3ley.dedyn.io` |
+
+Workflow: **Tools → API tokens… → Issue token** → type a device name → the token is shown once in a
+modal window (selectable, copied only by an explicit button; it never leaves the wallet in plaintext
+afterwards; **Show** reveals it on demand). **Revoke** removes it from the wallet, and the device
+loses access immediately. **Copy URL** puts the endpoint on the clipboard.
+
+Manual smoke tests:
+
+```bash
+./build/token-selftest   # wallet: list → issue → read → revoke (needs an unlocked wallet)
+./build/proxy-selftest   # proxy: auth, header rewriting, streaming, chunked bodies
+```
 
 ## Localization
 

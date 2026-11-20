@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic re-sync of Ollama API tokens from KDE Wallet
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=ollama-auth-tokens.service
+
+[Install]
+WantedBy=timers.target

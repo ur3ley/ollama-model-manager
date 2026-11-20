@@ -1,0 +1,6 @@
+GET / HTTP/P/1.1
+Host: t
+X-A: vInjected: 1.1
+Ho*st: t
+X-A: vInjected: 1
+
