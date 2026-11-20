@@ -132,7 +132,7 @@ int main(int argc, char *argv[])
     QCoreApplication &app = *appHolder;
 
     app.setApplicationName("Ollama Model Manager");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationVersion("1.1.0");
     app.setOrganizationName("OllamaManager");
 
     if (auto *guiApp = qobject_cast<QApplication *>(&app)) {

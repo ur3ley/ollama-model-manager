@@ -5,6 +5,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-21
+
 ### Added
 - **Built-in auth proxy** (replacing the nginx + podman container): token checks run
   inside the manager, tokens are read from KDE Wallet and kept only as SHA-256 hashes
