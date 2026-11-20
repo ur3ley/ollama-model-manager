@@ -14,6 +14,10 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 
 ![Ollama Model Manager — editor scrolled down to the system prompt and actions](docs/screenshot-2.png)
 
+![Ollama Model Manager — one API token per device, stored in KDE Wallet](docs/screenshot-3.png)
+
+![Ollama Model Manager — built-in proxy: listen addresses, upstream and TLS](docs/screenshot-4.png)
+
 ---
 
 ## Features
