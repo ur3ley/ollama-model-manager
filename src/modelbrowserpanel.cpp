@@ -1,5 +1,6 @@
 #include "modelbrowserpanel.h"
 
+#include "carddelegate.h"
 #include "designtokens.h"
 #include "i18n.h"
 
@@ -14,92 +15,10 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStandardItemModel>
-#include <QStyledItemDelegate>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
-
-QColor avatarColor(const QString &seed)
-{
-    const int hue = int(qHash(seed) % 360);
-    return QColor::fromHsv(hue, 110, 190);
-}
-
-enum Role {
-    RoleId = Qt::UserRole,
-    RoleTitle,
-    RoleSubtitle,
-    RoleStats,
-};
-
-class CardDelegate : public QStyledItemDelegate
-{
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
-
-    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override
-    {
-        return QSize(0, 68);
-    }
-
-    void paint(QPainter *painter, const QStyleOptionViewItem &option,
-               const QModelIndex &index) const override
-    {
-        painter->save();
-        painter->setRenderHint(QPainter::Antialiasing, true);
-
-        const QRect card = option.rect.adjusted(4, 3, -4, -3);
-        const bool selected = option.state & QStyle::State_Selected;
-        const bool hovered = option.state & QStyle::State_MouseOver;
-
-        const QColor background = selected ? QColor(tokens::CardSelected)
-                                           : hovered ? QColor(tokens::CardHover)
-                                                     : QColor(tokens::Card);
-        painter->setPen(QPen(selected ? QColor(tokens::Accent) : QColor(tokens::Border), selected ? 1.6 : 1.0));
-        painter->setBrush(background);
-        painter->drawRoundedRect(card, tokens::CardRadius, tokens::CardRadius);
-
-        const QString title = index.data(RoleTitle).toString();
-        const QString subtitle = index.data(RoleSubtitle).toString();
-        const QString stats = index.data(RoleStats).toString();
-
-        const QRect avatar(card.left() + 10, card.center().y() - 15, 30, 30);
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(avatarColor(subtitle + title));
-        painter->drawEllipse(avatar);
-        QFont avatarFont = option.font;
-        avatarFont.setBold(true);
-        painter->setFont(avatarFont);
-        painter->setPen(Qt::white);
-        painter->drawText(avatar, Qt::AlignCenter, title.left(1).toUpper());
-
-        const int statsWidth = stats.isEmpty() ? 0 : 150;
-        const QRect textRect = card.adjusted(50, 8, -statsWidth - 12, -8);
-
-        QFont titleFont = option.font;
-        titleFont.setBold(true);
-        painter->setFont(titleFont);
-        painter->setPen(QColor(tokens::Text));
-        const QFontMetrics titleMetrics(titleFont);
-        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignTop,
-                          titleMetrics.elidedText(title, Qt::ElideRight, textRect.width()));
-
-        QFont subtitleFont = option.font;
-        subtitleFont.setPointSizeF(qMax(7.0, subtitleFont.pointSizeF() - 1.0));
-        painter->setFont(subtitleFont);
-        painter->setPen(QColor(tokens::Muted));
-        const QFontMetrics subtitleMetrics(subtitleFont);
-        painter->drawText(textRect.adjusted(0, 20, 0, 0), Qt::AlignLeft | Qt::AlignTop,
-                          subtitleMetrics.elidedText(subtitle, Qt::ElideRight, textRect.width()));
-
-        if (!stats.isEmpty()) {
-            painter->setPen(QColor(tokens::Muted));
-            painter->drawText(card.adjusted(card.width() - statsWidth - 8, 0, -12, 0),
-                              Qt::AlignRight | Qt::AlignVCenter, stats);
-        }
-        painter->restore();
-    }
-};
 
 } // namespace
 
@@ -215,7 +134,7 @@ ModelBrowserPanel::ModelBrowserPanel(const QString &placeholder, QWidget *parent
 
     connect(m_list, &QListWidget::itemSelectionChanged, this, [this]() {
         auto *item = m_list->currentItem();
-        m_selectedId = item ? item->data(RoleId).toString() : QString();
+        m_selectedId = item ? item->data(cardrole::Id).toString() : QString();
         updateDetail();
         if (!m_selectedId.isEmpty())
             emit itemSelected(m_selectedId);
@@ -261,29 +180,56 @@ void ModelBrowserPanel::setActionText(const QString &text)
 
 void ModelBrowserPanel::setItems(const QList<BrowserItem> &items)
 {
+    // Large sources (the whole Ollama library is 270+ models) are inserted in
+    // small batches so the window stays responsive while the list fills up.
     m_items = items;
     m_selectedId.clear();
+    m_pendingItems = items;
+    m_pendingIndex = 0;
 
-    m_list->blockSignals(true);
     m_list->clear();
-    for (const BrowserItem &item : items) {
-        auto *row = new QListWidgetItem(m_list);
-        row->setData(RoleId, item.id);
-        row->setData(RoleTitle, item.title);
-        row->setData(RoleSubtitle, item.subtitle);
-        row->setData(RoleStats, item.stats);
-    }
-    m_list->blockSignals(false);
-
     m_emptyLabel->setVisible(items.isEmpty());
     m_list->setVisible(!items.isEmpty());
 
-    if (!items.isEmpty()) {
-        m_list->setCurrentRow(0);
-    } else {
+    if (items.isEmpty()) {
         updateDetail();
+        updateActionState();
+        return;
     }
-    updateActionState();
+
+    if (!m_batchTimer) {
+        m_batchTimer = new QTimer(this);
+        m_batchTimer->setInterval(0);
+        connect(m_batchTimer, &QTimer::timeout, this, [this]() {
+            appendBatch();
+        });
+    }
+    m_batchTimer->start();
+}
+
+void ModelBrowserPanel::appendBatch()
+{
+    constexpr int kBatch = 24;
+    m_list->blockSignals(true);
+    for (int i = 0; i < kBatch && m_pendingIndex < m_pendingItems.size(); ++i, ++m_pendingIndex) {
+        const BrowserItem &item = m_pendingItems.at(m_pendingIndex);
+        auto *row = new QListWidgetItem(m_list);
+        row->setData(cardrole::Id, item.id);
+        row->setData(cardrole::Title, item.title);
+        row->setData(cardrole::Subtitle, item.subtitle);
+        row->setData(cardrole::Stats, item.stats);
+    }
+    const bool first = m_list->count() > 0 && !m_list->currentItem();
+    const bool done = m_pendingIndex >= m_pendingItems.size();
+    m_list->blockSignals(false);
+
+    if (first)
+        m_list->setCurrentRow(0);
+    if (done) {
+        m_batchTimer->stop();
+        m_pendingItems.clear();
+        updateActionState();
+    }
 }
 
 void ModelBrowserPanel::clearItems()

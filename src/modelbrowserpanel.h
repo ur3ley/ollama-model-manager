@@ -11,6 +11,7 @@ class QListWidget;
 class QListWidgetItem;
 class QProgressBar;
 class QPushButton;
+class QTimer;
 
 struct BrowserVariant {
     QString id;      // what to install: family:tag or repo/file
@@ -66,6 +67,7 @@ signals:
 
 private:
     void updateDetail();
+    void appendBatch();
     void updateActionState();
     const BrowserItem *itemById(const QString &id) const;
     BrowserItem *itemById(const QString &id);
@@ -84,6 +86,9 @@ private:
     QProgressBar *m_progress;
     QLabel *m_statusLabel;
 
+    QTimer *m_batchTimer = nullptr;
+    QList<BrowserItem> m_pendingItems;
+    int m_pendingIndex = 0;
     QList<BrowserItem> m_items;
     QString m_selectedId;
     QString m_actionText;

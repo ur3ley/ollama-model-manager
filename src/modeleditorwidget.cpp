@@ -33,25 +33,32 @@ void ModelEditorWidget::setupUI()
 
     m_modelGroup = new QGroupBox();
     m_modelLayout = new QFormLayout(m_modelGroup);
+    // Every field takes the full remaining width; otherwise the FROM combo and
+    // the directive fields collapse to their size hint and look empty.
+    m_modelLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    m_modelLayout->setRowWrapPolicy(QFormLayout::DontWrapRows);
+    m_modelLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
     m_fromCombo = new QComboBox();
     m_fromCombo->setEditable(true);
-    m_modelLayout->addRow(QString(), m_fromCombo);
+    m_fromCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_fromCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_modelLayout->addRow(new QLabel(), m_fromCombo);
 
     m_nameEdit = new QLineEdit();
     m_nameEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._/:\\-]*"), m_nameEdit));
-    m_modelLayout->addRow(QString(), m_nameEdit);
+    m_modelLayout->addRow(new QLabel(), m_nameEdit);
 
     m_rendererEdit = new QLineEdit();
     m_rendererEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._\\-]*"), m_rendererEdit));
-    m_modelLayout->addRow(QString(), m_rendererEdit);
+    m_modelLayout->addRow(new QLabel(), m_rendererEdit);
 
     m_parserEdit = new QLineEdit();
     m_parserEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._\\-]*"), m_parserEdit));
-    m_modelLayout->addRow(QString(), m_parserEdit);
+    m_modelLayout->addRow(new QLabel(), m_parserEdit);
 
     form->addWidget(m_modelGroup);
 

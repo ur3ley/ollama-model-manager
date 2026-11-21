@@ -2,7 +2,7 @@
 #define MODELLISTWIDGET_H
 
 #include <QWidget>
-#include <QTreeWidget>
+#include <QListWidget>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -11,6 +11,7 @@
 #include "ollamacli.h"
 #include "i18n.h"
 
+// Installed models as hub-style cards: title, last-modified line and size.
 class ModelListWidget : public QWidget
 {
     Q_OBJECT
@@ -23,6 +24,7 @@ public:
 
 signals:
     void modelSelected(const QString &name);
+    void modelsLoaded();
     void modelDoubleClicked(const QString &name);
     void renameRequested(const QString &name);
     void deleteRequested(const QString &name);
@@ -30,8 +32,8 @@ signals:
     void importGGUFRequested();
 
 private slots:
-    void onItemClicked(QTreeWidgetItem *item, int column);
-    void onItemDoubleClicked(QTreeWidgetItem *item, int column);
+    void onItemClicked(QListWidgetItem *item);
+    void onItemDoubleClicked(QListWidgetItem *item);
     void onContextMenu(const QPoint &pos);
     void onFilterChanged(const QString &text);
     void onDeleteClicked();
@@ -42,13 +44,14 @@ private:
     void populateList(const QList<OllamaCli::ModelInfo> &models);
 
     OllamaCli *m_cli;
-    QTreeWidget *m_tree;
-    QLineEdit *m_filterEdit;
     QLabel *m_title;
+    QListWidget *m_list;
+    QLineEdit *m_filterEdit;
     QPushButton *m_refreshBtn;
     QPushButton *m_newBtn;
     QPushButton *m_importBtn;
     QPushButton *m_deleteBtn;
+    bool m_refreshing = false;
 };
 
 #endif // MODELLISTWIDGET_H

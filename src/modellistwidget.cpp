@@ -1,5 +1,8 @@
 #include "modellistwidget.h"
+#include "carddelegate.h"
+#include "designtokens.h"
 #include <QHeaderView>
+#include <QListWidget>
 #include <QMenu>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,6 +16,15 @@ ModelListWidget::ModelListWidget(OllamaCli *cli, QWidget *parent)
     connect(m_cli, &OllamaCli::createFinished, this, &ModelListWidget::refresh);
     connect(m_cli, &OllamaCli::deleteFinished, this, &ModelListWidget::refresh);
     connect(m_cli, &OllamaCli::copyFinished, this, &ModelListWidget::refresh);
+    connect(m_cli, &OllamaCli::modelsListed, this,
+            [this](bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error) {
+        Q_UNUSED(error);
+        m_refreshing = false;
+        m_refreshBtn->setEnabled(true);
+        m_refreshBtn->setText(T("list.refresh"));
+        if (ok)
+            populateList(models);
+    });
 }
 
 void ModelListWidget::setupUI()
@@ -36,15 +48,16 @@ void ModelListWidget::setupUI()
     m_filterEdit->setClearButtonEnabled(true);
     layout->addWidget(m_filterEdit);
 
-    m_tree = new QTreeWidget();
-    m_tree->setColumnWidth(0, 220);
-    m_tree->setColumnWidth(1, 70);
-    m_tree->setRootIsDecorated(false);
-    m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_tree->setAlternatingRowColors(true);
-    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_tree->header()->setStretchLastSection(false);
-    layout->addWidget(m_tree, 1);
+    m_list = new QListWidget();
+    m_list->setObjectName(QStringLiteral("modelList"));
+    m_list->setMinimumWidth(330);
+    m_list->setItemDelegate(new CardDelegate(m_list));
+    m_list->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_list->setUniformItemSizes(true);
+    m_list->setMouseTracking(true);
+    m_list->setFrameShape(QFrame::NoFrame);
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    layout->addWidget(m_list, 1);
 
     auto *btnLayout = new QHBoxLayout();
     m_newBtn = new QPushButton();
@@ -60,13 +73,18 @@ void ModelListWidget::setupUI()
     connect(m_newBtn, &QPushButton::clicked, this, &ModelListWidget::newModelRequested);
     connect(m_importBtn, &QPushButton::clicked, this, &ModelListWidget::importGGUFRequested);
     connect(m_deleteBtn, &QPushButton::clicked, this, &ModelListWidget::onDeleteClicked);
-    connect(m_tree, &QTreeWidget::itemClicked, this, &ModelListWidget::onItemClicked);
-    connect(m_tree, &QTreeWidget::itemDoubleClicked, this, &ModelListWidget::onItemDoubleClicked);
-    connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &ModelListWidget::onContextMenu);
-    connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this]() {
-        m_deleteBtn->setEnabled(m_tree->currentItem() != nullptr);
+    connect(m_list, &QListWidget::itemClicked, this, &ModelListWidget::onItemClicked);
+    connect(m_list, &QListWidget::itemDoubleClicked, this, &ModelListWidget::onItemDoubleClicked);
+    connect(m_list, &QListWidget::customContextMenuRequested, this, &ModelListWidget::onContextMenu);
+    connect(m_list, &QListWidget::itemSelectionChanged, this, [this]() {
+        m_deleteBtn->setEnabled(m_list->currentItem() != nullptr);
+        if (QListWidgetItem *item = m_list->currentItem())
+            emit modelSelected(item->text());
     });
     connect(m_filterEdit, &QLineEdit::textChanged, this, &ModelListWidget::onFilterChanged);
+
+    for (QPushButton *button : {m_refreshBtn, m_newBtn, m_importBtn, m_deleteBtn})
+        button->setStyleSheet(tokens::ghostButtonStyle());
 
     retranslateUi();
     connect(I18n::instance(), &I18n::languageChanged, this, &ModelListWidget::retranslateUi);
@@ -78,9 +96,6 @@ void ModelListWidget::retranslateUi()
     m_refreshBtn->setText(T("list.refresh"));
     m_refreshBtn->setToolTip(T("list.refreshTip"));
     m_filterEdit->setPlaceholderText(T("list.filter"));
-    m_tree->setHeaderLabels({T("list.colName"), T("list.colSize")});
-    m_tree->setColumnWidth(0, 220);
-    m_tree->setColumnWidth(1, 70);
     m_newBtn->setText(T("list.new"));
     m_newBtn->setToolTip(T("list.newTip"));
     m_importBtn->setText(T("list.import"));
@@ -91,65 +106,69 @@ void ModelListWidget::retranslateUi()
 
 void ModelListWidget::refresh()
 {
-    QList<OllamaCli::ModelInfo> models = m_cli->listModels();
-    populateList(models);
+    if (m_refreshing)
+        return;
+    m_refreshing = true;
+    m_refreshBtn->setEnabled(false);
+    m_refreshBtn->setText(T("list.refreshing"));
+    m_cli->listModelsAsync();
 }
 
 void ModelListWidget::populateList(const QList<OllamaCli::ModelInfo> &models)
 {
-    m_tree->clear();
+    m_list->clear();
 
     for (const auto &model : models) {
-        auto *item = new QTreeWidgetItem(m_tree);
-        item->setText(0, model.name);
-        item->setText(1, model.size);
-        item->setToolTip(0, T("list.itemTip").arg(model.id, model.modified));
-        item->setData(0, Qt::UserRole, model.id);
-        item->setData(0, Qt::UserRole + 1, model.modified);
+        auto *item = new QListWidgetItem(m_list);
+        item->setText(model.name);
+        item->setData(cardrole::Id, model.id);
+        item->setData(cardrole::Title, model.name);
+        item->setData(cardrole::Subtitle, model.modified);
+        item->setData(cardrole::Stats, model.size);
+        item->setToolTip(T("list.itemTip").arg(model.id, model.modified));
     }
+
+    if (m_list->count() > 0 && !m_list->currentItem())
+        m_list->setCurrentRow(0);
+    emit modelsLoaded();
 }
 
 QString ModelListWidget::currentModel() const
 {
-    QTreeWidgetItem *item = m_tree->currentItem();
-    if (item) {
-        return item->text(0);
-    }
-    return QString();
+    QListWidgetItem *item = m_list->currentItem();
+    return item ? item->text() : QString();
 }
 
 QStringList ModelListWidget::modelNames() const
 {
     QStringList names;
-    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
-        QTreeWidgetItem *item = m_tree->topLevelItem(i);
-        if (!item->isHidden()) {
-            names << item->text(0);
-        }
+    for (int i = 0; i < m_list->count(); ++i) {
+        QListWidgetItem *item = m_list->item(i);
+        if (!item->isHidden())
+            names << item->text();
     }
     return names;
 }
 
-void ModelListWidget::onItemClicked(QTreeWidgetItem *item, int)
+void ModelListWidget::onItemClicked(QListWidgetItem *item)
 {
-    if (item) {
-        emit modelSelected(item->text(0));
-    }
+    if (item)
+        emit modelSelected(item->text());
 }
 
-void ModelListWidget::onItemDoubleClicked(QTreeWidgetItem *item, int)
+void ModelListWidget::onItemDoubleClicked(QListWidgetItem *item)
 {
-    if (item) {
-        emit modelDoubleClicked(item->text(0));
-    }
+    if (item)
+        emit modelDoubleClicked(item->text());
 }
 
 void ModelListWidget::onContextMenu(const QPoint &pos)
 {
-    QTreeWidgetItem *item = m_tree->itemAt(pos);
-    if (!item) return;
+    QListWidgetItem *item = m_list->itemAt(pos);
+    if (!item)
+        return;
 
-    QString modelName = item->text(0);
+    const QString modelName = item->text();
 
     QMenu menu(this);
     QAction *editAction = menu.addAction(T("ctx.edit"));
@@ -158,7 +177,7 @@ void ModelListWidget::onContextMenu(const QPoint &pos)
     QAction *deleteAction = menu.addAction(T("ctx.delete"));
     deleteAction->setIcon(QApplication::style()->standardIcon(QStyle::SP_TrashIcon));
 
-    QAction *chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    QAction *chosen = menu.exec(m_list->viewport()->mapToGlobal(pos));
     if (chosen == editAction) {
         emit modelSelected(modelName);
     } else if (chosen == renameAction) {
@@ -170,10 +189,9 @@ void ModelListWidget::onContextMenu(const QPoint &pos)
 
 void ModelListWidget::onFilterChanged(const QString &text)
 {
-    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
-        QTreeWidgetItem *item = m_tree->topLevelItem(i);
-        bool matches = item->text(0).contains(text, Qt::CaseInsensitive);
-        item->setHidden(!matches);
+    for (int i = 0; i < m_list->count(); ++i) {
+        QListWidgetItem *item = m_list->item(i);
+        item->setHidden(!item->text().contains(text, Qt::CaseInsensitive));
     }
 }
 

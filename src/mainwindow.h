@@ -14,6 +14,9 @@
 
 class TokenManager;
 class ProxyService;
+class DiscoverPanel;
+class QTabWidget;
+class QTimer;
 
 class MainWindow : public QMainWindow
 {
@@ -66,6 +69,11 @@ private:
     bool m_hideOnClose = false;
     ModelListWidget *m_listWidget;
     ModelEditorWidget *m_editorWidget;
+    QTabWidget *m_tabs = nullptr;
+    DiscoverPanel *m_ollamaPanel = nullptr;
+    QTimer *m_editDebounce = nullptr;
+    QString m_pendingEditModel;
+    DiscoverPanel *m_hfPanel = nullptr;
     QSplitter *m_splitter;
 
     QMenu *m_fileMenu;

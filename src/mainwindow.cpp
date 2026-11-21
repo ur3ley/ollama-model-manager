@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "ggufimportdialog.h"
-#include "modelsearchdialog.h"
+#include "discoverpanel.h"
+#include "provenance.h"
+#include "registryclient.h"
 #include "renamedialog.h"
 #include "modelfilebuilder.h"
 #include "proxydialog.h"
@@ -18,6 +20,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QSettings>
+#include <QTabWidget>
+#include <QTimer>
+#include <QVBoxLayout>
 #include "i18n.h"
 
 MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *parent)
@@ -70,14 +75,40 @@ MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *par
 void MainWindow::setupUI()
 {
     setWindowTitle(tr("Ollama Model Manager"));
-    resize(920, 620);
+    resize(1180, 760);
 
-    m_splitter = new QSplitter(Qt::Horizontal, this);
-    setCentralWidget(m_splitter);
+    m_tabs = new QTabWidget();
+    m_tabs->setDocumentMode(true);
+    setCentralWidget(m_tabs);
+
+    auto *installedTab = new QWidget();
+    auto *installedLayout = new QVBoxLayout(installedTab);
+    installedLayout->setContentsMargins(0, 8, 0, 0);
+    m_splitter = new QSplitter(Qt::Horizontal);
+    installedLayout->addWidget(m_splitter, 1);
+    m_tabs->addTab(installedTab, QString());
+
+    m_ollamaPanel = new DiscoverPanel(DiscoverPanel::Source::Ollama, m_cli);
+    m_tabs->addTab(m_ollamaPanel, QString());
+    m_hfPanel = new DiscoverPanel(DiscoverPanel::Source::HuggingFace, m_cli);
+    m_tabs->addTab(m_hfPanel, QString());
+
+    connect(m_ollamaPanel, &DiscoverPanel::modelCreateRequested,
+            this, &MainWindow::onCreateModel);
+    connect(m_hfPanel, &DiscoverPanel::modelCreateRequested,
+            this, &MainWindow::onCreateModel);
+    connect(m_ollamaPanel, &DiscoverPanel::installedChanged, this, &MainWindow::onRefreshAll);
+    connect(m_hfPanel, &DiscoverPanel::installedChanged, this, &MainWindow::onRefreshAll);
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
+        if (index == 1)
+            m_ollamaPanel->activate();
+        else if (index == 2)
+            m_hfPanel->activate();
+    });
 
     m_listWidget = new ModelListWidget(m_cli);
-    m_listWidget->setMinimumWidth(260);
-    m_listWidget->setMaximumWidth(400);
+    m_listWidget->setMinimumWidth(340);
+    m_listWidget->setMaximumWidth(460);
     m_splitter->addWidget(m_listWidget);
 
     m_editorWidget = new ModelEditorWidget(m_cli);
@@ -86,10 +117,18 @@ void MainWindow::setupUI()
 
     m_splitter->setStretchFactor(0, 0);
     m_splitter->setStretchFactor(1, 1);
-    m_splitter->setSizes({280, 640});
+    m_splitter->setSizes({360, 800});
 
     connect(m_listWidget, &ModelListWidget::modelSelected,
             this, &MainWindow::onModelSelected);
+    connect(m_listWidget, &ModelListWidget::modelsLoaded, this, [this]() {
+        m_editorWidget->setAvailableModels(m_listWidget->modelNames());
+        if (m_editorWidget->getModelName().isEmpty()) {
+            const QString current = m_listWidget->currentModel();
+            if (!current.isEmpty())
+                onModelSelected(current);
+        }
+    });
     connect(m_listWidget, &ModelListWidget::newModelRequested,
             this, &MainWindow::onNewModel);
     connect(m_listWidget, &ModelListWidget::deleteRequested,
@@ -170,6 +209,9 @@ void MainWindow::retranslateUi()
     m_newAction->setText(T("menu.newModel"));
     m_importAction->setText(T("menu.importGguf"));
     m_downloadAction->setText(T("menu.searchModels"));
+    m_tabs->setTabText(0, T("search.tabInstalled"));
+    m_tabs->setTabText(1, T("search.tabOllama"));
+    m_tabs->setTabText(2, T("search.tabHf"));
     m_refreshAction->setText(T("menu.refresh"));
     m_quitAction->setText(T("menu.quit"));
     m_languageMenu->setTitle(T("menu.language"));
@@ -197,7 +239,27 @@ void MainWindow::onRefreshAll()
 
 void MainWindow::onModelSelected(const QString &modelName)
 {
-    m_editorWidget->loadModel(modelName);
+    const Provenance::Entry prov = Provenance::instance().lookup(modelName);
+    if (prov.source == QLatin1String("hf"))
+        statusBar()->showMessage(T("status.sourceHf").arg(prov.ref));
+    else if (prov.source == QLatin1String("ollama"))
+        statusBar()->showMessage(T("status.sourceOllama"));
+    else
+        statusBar()->showMessage(T("status.sourceUnknown"));
+
+    // `ollama show` runs two processes; debounce it so a click paints the list
+    // first and rapid clicks do not queue several loads.
+    m_pendingEditModel = modelName;
+    if (!m_editDebounce) {
+        m_editDebounce = new QTimer(this);
+        m_editDebounce->setSingleShot(true);
+        m_editDebounce->setInterval(120);
+        connect(m_editDebounce, &QTimer::timeout, this, [this]() {
+            if (!m_pendingEditModel.isEmpty())
+                m_editorWidget->loadModel(m_pendingEditModel);
+        });
+    }
+    m_editDebounce->start();
 }
 
 void MainWindow::showTokensDialog()
@@ -283,12 +345,11 @@ void MainWindow::onImportGGUF()
 
 void MainWindow::onDownloadModel()
 {
-    ModelSearchDialog dialog(m_cli, this);
-    connect(&dialog, &ModelSearchDialog::modelCreateRequested,
-            this, &MainWindow::onCreateModel);
-    connect(&dialog, &ModelSearchDialog::modelsChanged,
-            this, &MainWindow::onRefreshAll);
-    dialog.exec();
+    m_tabs->setCurrentIndex(m_tabs->currentIndex() == 2 ? 1 : 2);
+    if (m_tabs->currentIndex() == 1)
+        m_ollamaPanel->activate();
+    else
+        m_hfPanel->activate();
 }
 
 void MainWindow::onCreateModel(const QString &name, const QString &modelfileContent)

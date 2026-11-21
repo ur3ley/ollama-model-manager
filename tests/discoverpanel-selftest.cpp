@@ -1,17 +1,14 @@
-// Smoke test for the unified search/install dialog.
+// Smoke test for the hub source panels (Ollama and HuggingFace).
 //
-// Offline (default): constructs the dialog and checks the initial state.
+// Offline (default): constructs both panels and checks the initial state.
 //
 // Live modes (need network / Ollama):
-//   QT_QPA_PLATFORM=offscreen ./modelsearchdialog-selftest --live "qwen3" /tmp/shot.png
-//   QT_QPA_PLATFORM=offscreen ./modelsearchdialog-selftest --pull qwen3:0.6b
-//
-// `--pull` runs a real `ollama pull` through OllamaCli and prints the parsed
-// progress lines, so the progress regexes can be checked without the GUI.
+//   QT_QPA_PLATFORM=offscreen ./discoverpanel-selftest --live "qwen3" /tmp/shot.png
+//   QT_QPA_PLATFORM=offscreen ./discoverpanel-selftest --pull qwen3:0.6b
 
-#include "modelsearchdialog.h"
-#include "ollamacli.h"
+#include "discoverpanel.h"
 #include "i18n.h"
+#include "ollamacli.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -65,11 +62,10 @@ int main(int argc, char *argv[])
         bool finished = false;
         bool ok = false;
         int progressLines = 0;
-
         QObject::connect(&cli, &OllamaCli::pullProgress, &app,
                          [&](const QString &status, int percent) {
             ++progressLines;
-            if (progressLines <= 12 || percent == 100)
+            if (progressLines <= 8 || percent == 100)
                 QTextStream(stdout) << "  [" << percent << "%] " << status << "\n";
         });
         QObject::connect(&cli, &OllamaCli::pullFinished, &app,
@@ -79,7 +75,6 @@ int main(int argc, char *argv[])
             if (!success)
                 QTextStream(stdout) << "output: " << output << "\n";
         });
-
         cli.pullModelAsync(name);
         if (!waitFor([&] { return finished; }, 600000)) {
             QTextStream(stdout) << "FAIL pull timed out\n";
@@ -95,62 +90,52 @@ int main(int argc, char *argv[])
         const QString query = QString::fromLocal8Bit(argv[2]);
         const QString shot = QString::fromLocal8Bit(argv[3]);
 
-        ModelSearchDialog dlg(&cli);
-        dlg.resize(900, 760);
-        dlg.show();
-        dlg.searchAs(query);
-
-        if (!waitFor([&] { return dlg.modelCount() > 0; }, 40000)) {
-            QTextStream(stdout) << "FAIL no models; status: " << dlg.statusText() << "\n";
+        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &cli);
+        ollama.resize(1000, 700);
+        ollama.show();
+        ollama.searchAs(query);
+        if (!waitFor([&] { return ollama.modelCount() > 0; }, 40000)) {
+            QTextStream(stdout) << "FAIL no models; status: " << ollama.statusText() << "\n";
             return 1;
         }
-        dlg.selectModel(0);
-        if (!waitFor([&] { return dlg.tagCount() > 0; }, 40000)) {
-            QTextStream(stdout) << "FAIL no tags; status: " << dlg.statusText() << "\n";
+        ollama.selectModel(0);
+        if (!waitFor([&] { return ollama.tagCount() > 0; }, 40000)) {
+            QTextStream(stdout) << "FAIL no tags; status: " << ollama.statusText() << "\n";
             return 1;
         }
-        dlg.selectTag(0);
-
-        QTextStream(stdout) << "models: " << dlg.modelCount()
-                            << ", tags: " << dlg.tagCount()
-                            << ", suggested: " << dlg.suggestedName() << "\n";
+        ollama.selectTag(0);
         QCoreApplication::processEvents();
-        const bool saved = dlg.grab().save(shot);
-        QTextStream(stdout) << (saved ? "saved\n" : "save failed\n");
+        const bool savedOllama = ollama.grab().save(shot);
+        QTextStream(stdout) << "ollama models: " << ollama.modelCount()
+                            << ", variants: " << ollama.tagCount()
+                            << ", suggested: " << ollama.suggestedName() << "\n"
+                            << (savedOllama ? "saved ollama\n" : "save ollama failed\n");
 
-        dlg.showHfTab();
-        if (!waitFor([&] { return dlg.hfModelCount() > 0; }, 40000)) {
-            QTextStream(stdout) << "FAIL no HF repos; status: " << dlg.statusText() << "\n";
+        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &cli);
+        hf.resize(1000, 700);
+        hf.show();
+        hf.searchAs(QString());
+        if (!waitFor([&] { return hf.modelCount() > 0; }, 40000)) {
+            QTextStream(stdout) << "FAIL no HF repos; status: " << hf.statusText() << "\n";
             return 1;
         }
-        dlg.selectHfModel(0);
-        waitFor([&] { return dlg.hfVariantCount() > 0; }, 30000);
+        hf.selectModel(0);
+        waitFor([&] { return hf.tagCount() > 0; }, 30000);
         QCoreApplication::processEvents();
         const QString hfShot = shot + QStringLiteral(".hf.png");
-        const bool savedHf = dlg.grab().save(hfShot);
-        QTextStream(stdout) << "hf repos: " << dlg.hfModelCount() << "\n"
+        const bool savedHf = hf.grab().save(hfShot);
+        QTextStream(stdout) << "hf repos: " << hf.modelCount()
+                            << ", files: " << hf.tagCount() << "\n"
                             << (savedHf ? "saved hf\n" : "save hf failed\n");
-
-        dlg.showDeviceTab();
-        if (!waitFor([&] { return dlg.deviceCount() > 0; }, 30000)) {
-            QTextStream(stdout) << "no installed models yet\n";
-            return (saved && savedHf) ? 0 : 1;
-        }
-        dlg.selectDevice(0);
-        waitFor([&] { return dlg.deviceVariantCount() > 1; }, 30000);
-        QCoreApplication::processEvents();
-        const QString devShot = shot + QStringLiteral(".device.png");
-        const bool savedDev = dlg.grab().save(devShot);
-        QTextStream(stdout) << "installed: " << dlg.deviceCount() << "\n"
-                            << (savedDev ? "saved device\n" : "save device failed\n");
-        return (saved && savedHf && savedDev) ? 0 : 1;
+        return (savedOllama && savedHf) ? 0 : 1;
     }
 
     {
-        ModelSearchDialog dlg(&cli);
-        check(dlg.modelCount() == 0, QStringLiteral("no models on start"));
-        check(dlg.tagCount() == 0, QStringLiteral("no tags on start"));
-        check(dlg.suggestedName().isEmpty(), QStringLiteral("empty name field"));
+        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &cli);
+        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &cli);
+        check(ollama.modelCount() == 0, QStringLiteral("ollama panel starts empty"));
+        check(hf.modelCount() == 0, QStringLiteral("hf panel starts empty"));
+        check(ollama.suggestedName().isEmpty(), QStringLiteral("nothing selected"));
     }
 
     QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n"

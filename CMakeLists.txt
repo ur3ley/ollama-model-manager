@@ -23,10 +23,11 @@ set(SOURCES
     src/ggufimportdialog.cpp
     src/hfclient.cpp
     src/registryclient.cpp
+    src/carddelegate.cpp
     src/modelbrowserpanel.cpp
     src/modelfilters.cpp
     src/provenance.cpp
-    src/modelsearchdialog.cpp
+    src/discoverpanel.cpp
     src/renamedialog.cpp
     src/tokenmanager.cpp
     src/tokendialog.cpp
@@ -52,10 +53,11 @@ set(HEADERS
     src/ggufimportdialog.h
     src/hfclient.h
     src/registryclient.h
+    src/carddelegate.h
     src/modelbrowserpanel.h
     src/modelfilters.h
     src/provenance.h
-    src/modelsearchdialog.h
+    src/discoverpanel.h
     src/renamedialog.h
     src/tokenmanager.h
     src/tokendialog.h
@@ -157,14 +159,15 @@ add_executable(registryclient-selftest
 target_include_directories(registryclient-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(registryclient-selftest PRIVATE Qt6::Core Qt6::Network)
 
-# Smoke test for the unified search/install dialog (offscreen; --live/--pull use
-# network and ollama).
-#   QT_QPA_PLATFORM=offscreen ./modelsearchdialog-selftest
-add_executable(modelsearchdialog-selftest
-    tests/modelsearchdialog-selftest.cpp
-    src/modelsearchdialog.cpp
-    src/modelsearchdialog.h
+# Smoke test for the hub source panels (offscreen; --live/--pull use network).
+#   QT_QPA_PLATFORM=offscreen ./discoverpanel-selftest
+add_executable(discoverpanel-selftest
+    tests/discoverpanel-selftest.cpp
+    src/discoverpanel.cpp
+    src/discoverpanel.h
+    src/carddelegate.cpp
     src/modelbrowserpanel.cpp
+    src/carddelegate.h
     src/modelbrowserpanel.h
     src/modelfilters.cpp
     src/modelfilters.h
@@ -179,8 +182,16 @@ add_executable(modelsearchdialog-selftest
     src/i18n.cpp
     src/i18n.h
 )
-target_include_directories(modelsearchdialog-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(modelsearchdialog-selftest PRIVATE Qt6::Widgets Qt6::Network)
+target_include_directories(discoverpanel-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(discoverpanel-selftest PRIVATE Qt6::Widgets Qt6::Network)
+
+# Dev aid: offscreen screenshot of the main window.
+#   QT_QPA_PLATFORM=offscreen ./mainwindow-grab /tmp/main.png [tab]
+set(GRAB_SOURCES ${SOURCES})
+list(REMOVE_ITEM GRAB_SOURCES src/main.cpp)
+add_executable(mainwindow-grab tests/mainwindow-grab.cpp ${GRAB_SOURCES} ${HEADERS})
+target_include_directories(mainwindow-grab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mainwindow-grab PRIVATE Qt6::Widgets Qt6::Core Qt6::Network KF6::Wallet)
 
 # Offline self-test for the hub filter logic.
 #   ./modelfilters-selftest

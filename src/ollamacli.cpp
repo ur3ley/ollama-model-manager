@@ -186,12 +186,23 @@ OllamaCli::ModelParams OllamaCli::parseShowOutput(const QString &output)
                 else if (key == "parameters") params.paramCount = value;
                 else if (key == "context length") params.contextLength = value.toInt();
                 else if (key == "quantization") params.quantization = value;
+                else if (key == "renderer") params.renderer = value;
+                else if (key == "parser") params.parser = value;
             }
             break;
         }
-        case Capabilities:
-            params.capabilities.append(trimmed);
+        case Capabilities: {
+            // Nested details (e.g. "levels false, low, medium") must not be
+            // mistaken for capabilities.
+            static const QStringList known = {
+                QStringLiteral("completion"), QStringLiteral("tools"),
+                QStringLiteral("thinking"), QStringLiteral("vision"),
+                QStringLiteral("audio"), QStringLiteral("embedding")
+            };
+            if (known.contains(trimmed))
+                params.capabilities.append(trimmed);
             break;
+        }
         case Parameters: {
             QStringList kv = trimmed.split(kvRe, Qt::SkipEmptyParts);
             if (kv.size() >= 2) {
@@ -318,6 +329,39 @@ QString OllamaCli::extractDirective(const QString &modelfileContent, const QStri
 bool OllamaCli::isPulling() const
 {
     return m_pull != nullptr;
+}
+
+void OllamaCli::listModelsAsync()
+{
+    if (m_list) {
+        m_list->kill();
+        m_list->deleteLater();
+        m_list = nullptr;
+    }
+
+    auto *process = new QProcess(this);
+    m_list = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, process](int exitCode, QProcess::ExitStatus status) {
+        const QString output = QString::fromUtf8(process->readAllStandardOutput());
+        const QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        if (m_list == process)
+            m_list = nullptr;
+        process->deleteLater();
+        const bool ok = exitCode == 0 && status == QProcess::NormalExit;
+        emit modelsListed(ok, ok ? parseListOutput(output) : QList<ModelInfo>(), error);
+    });
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        const QString message = process->errorString();
+        if (m_list == process)
+            m_list = nullptr;
+        process->deleteLater();
+        emit modelsListed(false, {}, message);
+    });
+    process->start(m_ollamaPath, {QStringLiteral("list")});
 }
 
 void OllamaCli::pullModelAsync(const QString &name)

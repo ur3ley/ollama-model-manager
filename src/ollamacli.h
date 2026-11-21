@@ -39,6 +39,8 @@ public:
     QString ollamaPath() const;
 
     QList<ModelInfo> listModels();
+    /** Same as listModels(), but off the UI thread: emits modelsListed(). */
+    void listModelsAsync();
     ModelParams showModel(const QString &name);
     QString showModelfile(const QString &name);
 
@@ -64,6 +66,7 @@ signals:
     void deleteFinished(bool success, const QString &output);
     void copyFinished(bool success, const QString &output);
 
+    void modelsListed(bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error);
     void pullProgress(const QString &status, int percent);
     void pullFinished(bool success, const QString &output);
 
@@ -73,6 +76,7 @@ private:
     ModelParams parseShowOutput(const QString &output);
 
     QString m_ollamaPath;
+    QProcess *m_list = nullptr;
     QProcess *m_pull = nullptr;
     QString m_pullBuffer;
     QString m_lastPullStatus;
