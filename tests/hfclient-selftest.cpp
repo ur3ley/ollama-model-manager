@@ -6,7 +6,9 @@
 #include "hfclient.h"
 
 #include <QCoreApplication>
+#include <QNetworkRequest>
 #include <QTextStream>
+#include <QUrl>
 
 namespace {
 
@@ -111,6 +113,66 @@ int main(int argc, char *argv[])
                    QStringLiteral("Huihui-Qwen3-30B-A3B-Instruct-2507-abliterated.Q4_K_M.gguf")),
                QStringLiteral("huihui-qwen3-30b-a3b-instruct-2507-abliterated:q4_k_m"),
                QStringLiteral("name: no double dash, quant at the end"));
+
+    // Two quants of one repository that differ only by the suffix after the
+    // quant must get different names, or installing the second would overwrite
+    // the first (the `IQ4_XS` / `IQ4_XS-MTP` bug).
+    checkEqual(HfClient::modelNameFor(
+                   QStringLiteral("orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"),
+                   QStringLiteral("Qwen3.8-Flash-Next-Uncensored-IQ4_XS.gguf")),
+               QStringLiteral("qwen3.8-flash-next-uncensored:iq4_xs"),
+               QStringLiteral("name: plain IQ4_XS"));
+    checkEqual(HfClient::modelNameFor(
+                   QStringLiteral("orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"),
+                   QStringLiteral("Qwen3.8-Flash-Next-Uncensored-IQ4_XS-MTP-00001-of-00003.gguf")),
+               QStringLiteral("qwen3.8-flash-next-uncensored:iq4_xs-mtp"),
+               QStringLiteral("name: split MTP quant keeps its suffix"));
+    checkEqual(HfClient::modelNameFor(
+                   QStringLiteral("unsloth/Qwen3-30B-A3B-GGUF"),
+                   QStringLiteral("Qwen3-30B-A3B-Q8_0-MTP-00001-of-00002.gguf")),
+               QStringLiteral("qwen3-30b-a3b:q8_0-mtp"),
+               QStringLiteral("name: split Q8_0-MTP"));
+    checkEqual(HfClient::modelNameFor(
+                   QStringLiteral("unsloth/Qwen3-30B-A3B-GGUF"),
+                   QStringLiteral("Qwen3-30B-A3B-Q2_K.gguf")),
+               QStringLiteral("qwen3-30b-a3b:q2_k"),
+               QStringLiteral("name: bare Q2_K recovered from the file name"));
+
+    // --- gated repositories: token -> Authorization header ----------------------
+    checkEqual(HfClient::normalizeToken(QStringLiteral("  hf_abc123 \n")),
+               QStringLiteral("hf_abc123"),
+               QStringLiteral("token: spaces and line breaks trimmed"));
+    checkEqual(HfClient::normalizeToken(QStringLiteral("\t\r\n ")), QString(),
+               QStringLiteral("token: whitespace-only becomes empty"));
+
+    HfClient client;
+    check(!client.hasToken(), QStringLiteral("token: anonymous by default"));
+    client.setToken(QStringLiteral("  hf_x \r\n"));
+    checkEqual(client.token(), QStringLiteral("hf_x"),
+               QStringLiteral("token: setToken trims what the user typed"));
+    client.setToken(QStringLiteral("   "));
+    check(!client.hasToken(), QStringLiteral("token: blank input clears the header"));
+
+    const QUrl gatedUrl(QStringLiteral("https://huggingface.co/api/models/meta-llama/Llama-3-GGUF"));
+    const QNetworkRequest anonymous = HfClient::requestFor(gatedUrl, QString());
+    check(!anonymous.hasRawHeader("Authorization"),
+          QStringLiteral("request: no Authorization header without a token"));
+    check(anonymous.rawHeader("User-Agent") == QByteArrayLiteral("ollama-model-manager"),
+          QStringLiteral("request: user agent kept"));
+    check(anonymous.attribute(QNetworkRequest::RedirectPolicyAttribute).toInt()
+              == int(QNetworkRequest::NoLessSafeRedirectPolicy),
+          QStringLiteral("request: redirect policy kept"));
+
+    const QNetworkRequest authorized =
+            HfClient::requestFor(gatedUrl, QStringLiteral(" hf_secret\n"));
+    check(authorized.rawHeader("Authorization") == QByteArrayLiteral("Bearer hf_secret"),
+          QStringLiteral("request: Bearer header from a pasted token"));
+    check(authorized.url() == gatedUrl, QStringLiteral("request: url unchanged"));
+
+    check(HfClient::isAuthError(QStringLiteral("HTTP 401: this repository is gated, a token is required")),
+          QStringLiteral("error: 401 recognised (hint is added by the panel)"));
+    check(!HfClient::isAuthError(QStringLiteral("HTTP 404: repository or file not found")),
+          QStringLiteral("error: 404 is not a token problem"));
 
     QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n"
                                             : "FAILURES: " + QString::number(g_failures) + "\n");

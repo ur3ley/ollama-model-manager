@@ -19,6 +19,7 @@
 #include "modelfilebuilder.h"
 #include "i18n.h"
 #include "registryclient.h"
+#include "repogroup.h"
 
 class ModelEditorWidget : public QWidget
 {
@@ -26,6 +27,8 @@ class ModelEditorWidget : public QWidget
 public:
     explicit ModelEditorWidget(OllamaCli *cli, QWidget *parent = nullptr);
 
+    /** Edit an installed repository: FROM = its installed quants. */
+    void loadRepo(const RepoGroup &group);
     void loadModel(const QString &modelName);
     void setEditMode(const QString &modelName);
     void setCreateMode();
@@ -33,11 +36,20 @@ public:
 
     ModelfileBuilder::Config collectConfig();
     QString getModelName() const;
+    /** Empty in "new model" mode; the repository id otherwise. */
+    QString repoId() const { return m_repo.id; }
 
 signals:
     void createRequested(const QString &name, const QString &modelfileContent);
     void updateRequested(const QString &name, const QString &modelfileContent);
     void renameRequested(const QString &oldName, const QString &newName);
+    /** Rename an installed quant and immediately rebuild it with new parameters. */
+    void renameAndUpdateRequested(const QString &oldName, const QString &newName,
+                                  const QString &modelfileContent);
+    /** Local model without provenance: open "bind source…" for this name. */
+    void bindSourceRequested(const QString &modelName);
+    /** Delete only the quant selected in FROM (the repository stays). */
+    void deleteQuantRequested(const QString &modelName);
 
 private slots:
     void onFromChanged(const QString &baseModel);
@@ -45,6 +57,7 @@ private slots:
     void onCreate();
     void onUpdate();
     void onNumCtxChanged(int value);
+    void onClear();
 
 private:
     void setupUI();
@@ -58,6 +71,7 @@ private:
     void setMaxCtxLabel(int maxCtx);
     void toggleParamEnabled(QCheckBox *check, QWidget *widget);
     void setAdvancedVisible(bool visible);
+    void applyFromComboColors();
     void rebuildFromCombo(const QString &select = QString());
     void requestFamilyTags();
     void onFamilyTags(bool ok, const QList<RegistryClient::Tag> &tags, const QString &error);
@@ -65,12 +79,20 @@ private:
     void onFromContextMenu(const QPoint &pos);
     bool selectedFromInstalled() const;
     void updateModelButtons();
+    void updateDeleteQuantState();
     void installSelectedQuant();
     void updateModelRowVisibility();
+    QString currentFromName() const;
+    void updateNameForSelection();
+    void updateSourceLabel();
+    void applyRepoModeToFrom();
 
     OllamaCli *m_cli;
 
     QLabel *m_titleLabel;
+    QLabel *m_sourceLabel;
+    QLabel *m_unknownSourceLabel;
+    QPushButton *m_bindSourceBtn;
     QLabel *m_capsLabel;
     QGroupBox *m_modelGroup;
     QFormLayout *m_modelLayout;
@@ -88,6 +110,8 @@ private:
     QStringList m_localModels;
     QString m_pendingInstall;
     QComboBox *m_fromCombo;
+    QWidget *m_fromRowWidget = nullptr;
+    QToolButton *m_deleteQuantBtn = nullptr;
     QLineEdit *m_nameEdit;
     QLineEdit *m_rendererEdit;
     QLineEdit *m_parserEdit;
@@ -125,6 +149,7 @@ private:
 
     QLabel *m_statusLabel;
     QString m_currentEditModel;
+    RepoGroup m_repo;
     QStringList m_capabilities;
     bool m_templateSoftSwitch = false;
     QString m_fromBlob;  // direct blob path for updates, bypasses inheritance

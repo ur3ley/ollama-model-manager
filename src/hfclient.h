@@ -11,12 +11,18 @@
 // Thin wrapper over the public HuggingFace Hub API, enough to browse GGUF
 // repos and download a single quant file.
 //
-// Only public endpoints are used (no token):
+// Endpoints used:
 //   GET /api/models?search=<q>&filter=gguf&sort=downloads
 //   GET /api/models/<repo>?blobs=true
 //   GET /<repo>/resolve/main/<file>
 //
-// The JSON parsers are static so they can be tested offline.
+// Public repositories need no authentication; gated ones answer 401 until a
+// user token is set with setToken(). The token is sent as
+// `Authorization: Bearer <token>` on every request, exactly what the Hub asks
+// for.
+//
+// The JSON parsers and the request builder are static so they can be tested
+// offline.
 class HfClient : public QObject
 {
     Q_OBJECT
@@ -44,6 +50,25 @@ public:
     explicit HfClient(QObject *parent = nullptr);
     ~HfClient() override;
 
+    /**
+     * User token for gated repositories. Empty (the default) means anonymous
+     * access. The value is trimmed, so a token pasted with a trailing newline
+     * still produces a valid header.
+     */
+    void setToken(const QString &token);
+    QString token() const { return m_token; }
+    bool hasToken() const { return !m_token.isEmpty(); }
+
+    /** Trim spaces/line breaks from a pasted token (static for the self-test). */
+    static QString normalizeToken(const QString &token);
+    /** Is this error a Hub "gated repository" rejection? */
+    static bool isAuthError(const QString &error);
+    /**
+     * Request builder used by get(); static and side-effect free so the
+     * Authorization header can be checked without any network access.
+     */
+    static QNetworkRequest requestFor(const QUrl &url, const QString &token);
+
     void search(const QString &query, int limit = 40,
                 const QString &sort = QStringLiteral("downloads"));
     void listFiles(const QString &repo);
@@ -68,6 +93,7 @@ private:
     QNetworkReply *get(const QUrl &url);
     static QString networkError(QNetworkReply *reply);
 
+    QString m_token;  // empty: anonymous Hub access
     QNetworkAccessManager *m_nam;
     QNetworkReply *m_download = nullptr;
     QNetworkReply *m_search = nullptr;

@@ -1,5 +1,8 @@
 #include "modeleditorwidget.h"
 
+#include "combohighlightdelegate.h"
+#include "popupcombobox.h"
+
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QScrollArea>
@@ -11,19 +14,7 @@
 #include "designtokens.h"
 #include "doticons.h"
 #include "memoryinfo.h"
-
-namespace {
-QString stripQuantSuffix(const QString &tagPart)
-{
-    static const QRegularExpression quantRe(
-        QStringLiteral("-(?:ud-)?(?:iq[0-9]+(?:_[a-z0-9]+)*|q[0-9]+(?:_[a-z0-9]+)+"
-                       "|bf16|f16|f32|fp16|fp8)$"),
-        QRegularExpression::CaseInsensitiveOption);
-    QString stem = tagPart;
-    stem.remove(quantRe);
-    return stem;
-}
-} // namespace
+#include "quantmatch.h"
 
 ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
     : QWidget(parent)
@@ -31,6 +22,10 @@ ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
     , m_registry(new RegistryClient(this))
 {
     setupUI();
+
+    connect(theme::Theme::instance(), &theme::Theme::changed, this, [this]() {
+        applyFromComboColors();
+    });
 
     connect(m_registry, &RegistryClient::tagsFinished, this,
             [this](bool ok, const QList<RegistryClient::Tag> &tags, const QString &error) {
@@ -41,7 +36,7 @@ ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
             return;
         const QString installed = m_pendingInstall;
         m_pendingInstall.clear();
-        m_fromCombo->setEnabled(true);
+        applyRepoModeToFrom();
         if (!ok) {
             m_statusLabel->setText(T("editor.quantFailed").arg(output));
             return;
@@ -49,10 +44,12 @@ ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
         m_statusLabel->setText(T("editor.quantInstalled").arg(installed));
         m_localModels.append(installed);
         rebuildFromCombo(installed);
+        updateNameForSelection();
         updateModelButtons();
     });
     connect(m_cli, &OllamaCli::deleteFinished, this, [this](bool, const QString &) {
-        rebuildFromCombo(m_fromCombo->currentText());
+        rebuildFromCombo(currentFromName());
+        updateNameForSelection();
     });
 }
 
@@ -67,6 +64,33 @@ void ModelEditorWidget::setupUI()
     boldFont.setPointSize(boldFont.pointSize() + 2);
     m_titleLabel->setFont(boldFont);
     mainLayout->addWidget(m_titleLabel);
+
+    // Second title line: repository · owner (the ref goes into the tooltip).
+    m_sourceLabel = new QLabel();
+    tokens::setMuted(m_sourceLabel);
+    tokens::setCaption(m_sourceLabel);
+    m_sourceLabel->setVisible(false);
+    mainLayout->addWidget(m_sourceLabel);
+
+    // Local model: provenance is unknown, offer to restore it without a reinstall.
+    auto *bindRow = new QHBoxLayout();
+    m_unknownSourceLabel = new QLabel();
+    tokens::setMuted(m_unknownSourceLabel);
+    tokens::setCaption(m_unknownSourceLabel);
+    m_unknownSourceLabel->setWordWrap(true);
+    m_unknownSourceLabel->setVisible(false);
+    bindRow->addWidget(m_unknownSourceLabel, 1);
+    m_bindSourceBtn = new QPushButton();
+    m_bindSourceBtn->setVisible(false);
+    bindRow->addWidget(m_bindSourceBtn);
+    mainLayout->addLayout(bindRow);
+    connect(m_bindSourceBtn, &QPushButton::clicked, this, [this]() {
+        QString name = m_currentEditModel;
+        if (name.isEmpty() && !m_repo.quants.isEmpty())
+            name = m_repo.quants.first().modelName;
+        if (!name.isEmpty())
+            emit bindSourceRequested(name);
+    });
 
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
@@ -83,13 +107,29 @@ void ModelEditorWidget::setupUI()
     m_modelLayout->setRowWrapPolicy(QFormLayout::DontWrapRows);
     m_modelLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
-    m_fromCombo = new QComboBox();
+    m_fromCombo = new PopupComboBox();
     m_fromCombo->setEditable(true);
     m_fromCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_fromCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_fromCombo->setContextMenuPolicy(Qt::CustomContextMenu);
     m_fromCombo->setObjectName(QStringLiteral("fromCombo"));
-    m_modelLayout->addRow(new QLabel(), m_fromCombo);
+    m_fromCombo->view()->setMouseTracking(true);
+    m_fromCombo->view()->setItemDelegate(new ComboHighlightDelegate(m_fromCombo->view()));
+
+    // Delete sits right next to the quant picker: the action always targets the
+    // quant selected in FROM, never the whole repository.
+    auto *fromRow = new QWidget();
+    auto *fromRowLayout = new QHBoxLayout(fromRow);
+    fromRowLayout->setContentsMargins(0, 0, 0, 0);
+    fromRowLayout->setSpacing(6);
+    fromRowLayout->addWidget(m_fromCombo, 1);
+    m_deleteQuantBtn = new QToolButton();
+    m_deleteQuantBtn->setAutoRaise(true);
+    m_deleteQuantBtn->setIcon(QApplication::style()->standardIcon(QStyle::SP_TrashIcon));
+    m_deleteQuantBtn->setEnabled(false);
+    fromRowLayout->addWidget(m_deleteQuantBtn);
+    m_fromRowWidget = fromRow;
+    m_modelLayout->addRow(new QLabel(), fromRow);
 
     m_nameEdit = new QLineEdit();
     m_nameEdit->setValidator(new QRegularExpressionValidator(
@@ -109,7 +149,8 @@ void ModelEditorWidget::setupUI()
     // Read-only summary: what the model is built from and which renderer it uses.
     m_modelInfoLabel = new QLabel();
     m_modelInfoLabel->setWordWrap(true);
-    m_modelInfoLabel->setStyleSheet("color: #666; font-size: 11px;");
+    tokens::setMuted(m_modelInfoLabel);
+    tokens::setCaption(m_modelInfoLabel);
     m_modelInfoLabel->setTextFormat(Qt::PlainText);
     m_modelLayout->addRow(m_modelInfoLabel);
 
@@ -130,13 +171,17 @@ void ModelEditorWidget::setupUI()
     form->addWidget(m_modelGroup);
 
     m_capsLabel = new QLabel();
-    m_capsLabel->setStyleSheet("color: #666; font-size: 11px; padding-left: 4px;");
+    tokens::setMuted(m_capsLabel);
+    tokens::setCaption(m_capsLabel);
+    m_capsLabel->setProperty("indent", true);
     m_capsLabel->setWordWrap(true);
     form->addWidget(m_capsLabel);
 
     m_templateWarnLabel = new QLabel();
     m_templateWarnLabel->setWordWrap(true);
-    m_templateWarnLabel->setStyleSheet("color: #b36b00; font-size: 11px; padding-left: 4px;");
+    tokens::setRole(m_templateWarnLabel, "warning");
+    tokens::setCaption(m_templateWarnLabel);
+    m_templateWarnLabel->setProperty("indent", true);
     m_templateWarnLabel->setVisible(false);
     form->addWidget(m_templateWarnLabel);
 
@@ -164,11 +209,15 @@ void ModelEditorWidget::setupUI()
     ctxLayout->addLayout(ctxRow);
 
     m_defaultCtxLabel = new QLabel();
-    m_defaultCtxLabel->setStyleSheet("color: #666; font-size: 11px; padding-left: 4px;");
+    tokens::setMuted(m_defaultCtxLabel);
+    tokens::setCaption(m_defaultCtxLabel);
+    m_defaultCtxLabel->setProperty("indent", true);
     ctxLayout->addWidget(m_defaultCtxLabel);
 
     m_maxCtxLabel = new QLabel();
-    m_maxCtxLabel->setStyleSheet("color: #666; font-size: 11px; padding-left: 4px;");
+    tokens::setMuted(m_maxCtxLabel);
+    tokens::setCaption(m_maxCtxLabel);
+    m_maxCtxLabel->setProperty("indent", true);
     ctxLayout->addWidget(m_maxCtxLabel);
 
     form->addWidget(m_ctxGroup);
@@ -268,10 +317,11 @@ void ModelEditorWidget::setupUI()
     btnLayout->addWidget(m_previewBtn);
 
     m_createBtn = new QPushButton();
-    m_createBtn->setStyleSheet("QPushButton { font-weight: bold; }");
+    m_createBtn->setProperty("accent", true);
     btnLayout->addWidget(m_createBtn);
 
     m_updateBtn = new QPushButton();
+    m_updateBtn->setProperty("accent", true);
     m_updateBtn->setVisible(false);
     btnLayout->addWidget(m_updateBtn);
 
@@ -281,7 +331,8 @@ void ModelEditorWidget::setupUI()
     mainLayout->addLayout(btnLayout);
 
     m_statusLabel = new QLabel();
-    m_statusLabel->setStyleSheet("color: #888; font-size: 11px; padding: 2px;");
+    tokens::setMuted(m_statusLabel);
+    tokens::setCaption(m_statusLabel);
     mainLayout->addWidget(m_statusLabel);
 
     connect(m_numCtxCheck, &QCheckBox::toggled, this, [this](bool checked) {
@@ -321,10 +372,17 @@ void ModelEditorWidget::setupUI()
             this, &ModelEditorWidget::onFromActivated);
     connect(m_fromCombo, &QComboBox::customContextMenuRequested,
             this, &ModelEditorWidget::onFromContextMenu);
+    connect(m_fromCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateDeleteQuantState(); });
+    connect(m_deleteQuantBtn, &QToolButton::clicked, this, [this]() {
+        const QString name = m_fromCombo->currentData().toString();
+        if (!name.isEmpty())
+            emit deleteQuantRequested(name);
+    });
     connect(m_previewBtn, &QPushButton::clicked, this, &ModelEditorWidget::onPreview);
     connect(m_createBtn, &QPushButton::clicked, this, &ModelEditorWidget::onCreate);
     connect(m_updateBtn, &QPushButton::clicked, this, &ModelEditorWidget::onUpdate);
-    connect(m_clearBtn, &QPushButton::clicked, this, &ModelEditorWidget::setCreateMode);
+    connect(m_clearBtn, &QPushButton::clicked, this, &ModelEditorWidget::onClear);
     connect(m_numCtxSpin, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &ModelEditorWidget::onNumCtxChanged);
 
@@ -335,11 +393,18 @@ void ModelEditorWidget::setupUI()
 void ModelEditorWidget::retranslateUi()
 {
     m_titleLabel->setText(T("editor.title"));
+    updateSourceLabel();
+    m_unknownSourceLabel->setText(T("bind.unknownSource"));
+    m_bindSourceBtn->setText(T("bind.open"));
+    m_bindSourceBtn->setToolTip(T("bind.unknownSource"));
 
     m_modelGroup->setTitle(T("editor.modelGroup"));
-    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_fromCombo)))
+    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_fromRowWidget)))
         l->setText(T("editor.from"));
-    m_fromCombo->setToolTip(T("editor.fromTip"));
+    m_fromCombo->setToolTip(!m_repo.id.isEmpty() ? T("editor.sourceImmutableTip")
+                                                 : T("editor.fromTip"));
+    m_deleteQuantBtn->setToolTip(T("editor.deleteQuantTip"));
+    m_deleteQuantBtn->setAccessibleName(T("editor.deleteQuant"));
     if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_nameEdit)))
         l->setText(T("editor.name"));
     m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
@@ -434,50 +499,103 @@ void ModelEditorWidget::updateTemplateInfo(const OllamaCli::ModelParams &params)
         m_templateWarnLabel->setText(T("editor.templateSoftSwitch"));
 }
 
+void ModelEditorWidget::applyFromComboColors()
+{
+    const theme::Palette &p = tokens::activePalette();
+    for (int i = 0; i < m_fromCombo->count(); ++i) {
+        if (m_fromCombo->itemData(i).toString().isEmpty())
+            continue; // separator
+        if (m_fromCombo->itemData(i, Qt::UserRole + 1).toBool())
+            continue; // already installed: default text colour
+        const int fit = m_fromCombo->itemData(i, Qt::UserRole + 2).toInt();
+        const bool warning = fit == int(memoryinfo::Fit::No)
+                || fit == int(memoryinfo::Fit::Tight);
+        m_fromCombo->setItemData(i, warning ? p.warning : p.muted, Qt::ForegroundRole);
+    }
+}
+
 void ModelEditorWidget::rebuildFromCombo(const QString &select)
 {
-    const QString current = select.isEmpty() ? m_fromCombo->currentText() : select;
+    // `select` is always a model name (the item's data), never the visible
+    // label: an installed quant is labelled with its original ref, so the two
+    // differ whenever the model was renamed.
+    const QString current = select.isEmpty()
+            ? (m_fromCombo->currentData().isValid() ? m_fromCombo->currentData().toString()
+                                                    : m_fromCombo->currentText().trimmed())
+            : select;
 
     m_fromCombo->blockSignals(true);
     m_fromCombo->clear();
-    for (const QString &name : m_localModels)
-        m_fromCombo->addItem(name, name);
 
-    if (!m_familyTags.isEmpty()) {
-        m_fromCombo->insertSeparator(m_fromCombo->count());
+    if (!m_repo.id.isEmpty()) {
+        // FROM of an installed repository: only its own installed quants.
+        for (const InstalledQuant &quant : m_repo.quants) {
+            // Ollama quants are identified by their original tag; a HuggingFace
+            // quant by the file's quantization label (IQ4_XS-MTP), because its
+            // ref is the repository, not the variant.
+            QString label = quant.originalLabel;
+            if (label.isEmpty())
+                label = quant.originalRef.isEmpty() ? quant.modelName : quant.originalRef;
+            if (quant.renamed())
+                label += QStringLiteral("   · ") + quant.modelName;
+            m_fromCombo->addItem(label, quant.modelName);
+            const int row = m_fromCombo->count() - 1;
+            m_fromCombo->setItemData(row, true, Qt::UserRole + 1);
+            m_fromCombo->setItemData(row, true, Qt::UserRole + 2);
+        }
+    } else {
+        for (const QString &name : m_localModels)
+            m_fromCombo->addItem(name, name);
+    }
+
+    if (m_repo.id.isEmpty() && !m_familyTags.isEmpty()) {
+        if (m_fromCombo->count() > 0)
+            m_fromCombo->insertSeparator(m_fromCombo->count());
         for (const RegistryClient::Tag &tag : m_familyTags) {
-            // Only quants of this very model line, not every tag of the family
-            // (qwen3 alone has 90+ tags from 0.6b to 235b).
-            const QString tagStem = stripQuantSuffix(tag.name.section(QLatin1Char(':'), 1));
-            if (!m_modelStem.isEmpty() && tagStem != m_modelStem)
+            // Already listed as an installed quant of this repository.
+            bool duplicate = false;
+            for (const InstalledQuant &quant : m_repo.quants) {
+                if (quant.modelName == tag.name)
+                    duplicate = true;
+            }
+            if (duplicate)
                 continue;
+            if (m_repo.id.isEmpty()) {
+                // Only quants of this very model line, not every tag of the family
+                // (qwen3 alone has 90+ tags from 0.6b to 235b).
+                const QString tagStem = stripQuantSuffix(tag.name.section(QLatin1Char(':'), 1));
+                if (!m_modelStem.isEmpty() && tagStem != m_modelStem)
+                    continue;
+            }
             const bool installed = m_localModels.contains(tag.name);
             const quint64 bytes = memoryinfo::parseSizeBytes(tag.size);
-            const bool fits = memoryinfo::fits(bytes);
+            const memoryinfo::Fit fit = memoryinfo::fitLevel(bytes);
             QString label = tag.name;
             if (installed)
                 label += QStringLiteral("   \u2713 ") + T("editor.quantInstalledMark");
             else
                 label += QStringLiteral("   \u2193 ") + tag.size;
-            if (!fits)
+            if (fit == memoryinfo::Fit::No)
                 label += QStringLiteral("   · ") + T("browser.noFit");
-            m_fromCombo->addItem(dotIcon(fits), label, tag.name);
-            if (!installed && !fits)
-                m_fromCombo->setItemData(m_fromCombo->count() - 1,
-                                         QColor(tokens::CardSelected), Qt::ForegroundRole);
-            else if (!installed)
-                m_fromCombo->setItemData(m_fromCombo->count() - 1,
-                                         QColor(tokens::Muted), Qt::ForegroundRole);
+            else if (fit == memoryinfo::Fit::Tight)
+                label += QStringLiteral("   · ") + T("browser.mayNotFit");
+            m_fromCombo->addItem(dotIcon(fit), label, tag.name);
+            const int row = m_fromCombo->count() - 1;
+            // Keep the flags, not the colours: the colours are re-derived from
+            // the active palette whenever the theme changes.
+            m_fromCombo->setItemData(row, installed, Qt::UserRole + 1);
+            m_fromCombo->setItemData(row, int(fit), Qt::UserRole + 2);
         }
     }
     m_fromCombo->blockSignals(false);
 
-    for (int i = 0; i < m_fromCombo->count(); ++i) {
-        if (m_fromCombo->itemData(i).toString() == current) {
-            m_fromCombo->setCurrentIndex(i);
-            break;
-        }
-    }
+    applyFromComboColors();
+
+    int idx = m_fromCombo->findData(current);
+    if (idx < 0)
+        idx = m_fromCombo->findText(current);
+    if (idx >= 0)
+        m_fromCombo->setCurrentIndex(idx);
     updateModelButtons();
 }
 
@@ -497,21 +615,96 @@ void ModelEditorWidget::onFamilyTags(bool ok, const QList<RegistryClient::Tag> &
         return;
     }
     m_familyTags = tags;
-    rebuildFromCombo(m_fromCombo->currentText());
+    rebuildFromCombo(currentFromName());
     m_statusLabel->setText(T("editor.quantsLoaded").arg(tags.size()));
 }
 
 bool ModelEditorWidget::selectedFromInstalled() const
 {
+    return m_localModels.contains(currentFromName());
+}
+
+QString ModelEditorWidget::currentFromName() const
+{
+    const QString data = m_fromCombo->currentData().toString();
+    return data.isEmpty() ? m_fromCombo->currentText().trimmed() : data;
+}
+
+void ModelEditorWidget::updateNameForSelection()
+{
+    if (m_repo.id.isEmpty())
+        return;
+
+    const QString name = currentFromName();
+    const bool installed = !name.isEmpty() && m_localModels.contains(name);
+    m_nameEdit->setEnabled(installed);
+    if (installed) {
+        m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
+        m_nameEdit->setText(name);
+    } else {
+        m_nameEdit->clear();
+        m_nameEdit->setPlaceholderText(T("editor.notInstalled"));
+    }
+    updateModelButtons();
+}
+
+void ModelEditorWidget::updateSourceLabel()
+{
+    if (m_repo.id.isEmpty()) {
+        m_sourceLabel->clear();
+        m_sourceLabel->setVisible(false);
+        m_unknownSourceLabel->setVisible(false);
+        m_bindSourceBtn->setVisible(false);
+        return;
+    }
+
+    QString text = m_repo.local
+            ? T("list.localSource")
+            : (m_repo.owner.isEmpty() ? m_repo.title
+                                      : T("editor.sourceLine").arg(m_repo.title, m_repo.owner));
+    m_sourceLabel->setText(text);
+    m_sourceLabel->setToolTip(m_repo.ref.isEmpty()
+            ? T("editor.sourceImmutableTip")
+            : T("editor.sourceImmutableTip") + QLatin1Char('\n') + m_repo.ref);
+    m_sourceLabel->setVisible(true);
+
+    // A local card has no origin at all: say so and offer the repair path.
+    m_unknownSourceLabel->setVisible(m_repo.local);
+    m_bindSourceBtn->setVisible(m_repo.local);
+}
+
+void ModelEditorWidget::applyRepoModeToFrom()
+{
+    const bool repoMode = !m_repo.id.isEmpty();
+    m_fromCombo->setEditable(!repoMode);
+    // A local model has nothing to choose from: its single quant is the source.
+    m_fromCombo->setEnabled(!(repoMode && m_repo.local && m_repo.quants.size() <= 1));
+    m_fromCombo->setToolTip(repoMode ? T("editor.sourceImmutableTip") : T("editor.fromTip"));
+}
+
+void ModelEditorWidget::updateDeleteQuantState()
+{
     const QString name = m_fromCombo->currentData().toString();
-    if (name.isEmpty())
-        return !m_fromCombo->currentText().trimmed().isEmpty()
-                && m_localModels.contains(m_fromCombo->currentText().trimmed());
-    return m_localModels.contains(name);
+    bool installed = false;
+    if (!name.isEmpty()) {
+        if (!m_repo.id.isEmpty()) {
+            for (const InstalledQuant &quant : std::as_const(m_repo.quants)) {
+                if (quant.modelName == name) {
+                    installed = true;
+                    break;
+                }
+            }
+        } else {
+            installed = m_localModels.contains(name)
+                    || (!m_currentEditModel.isEmpty() && name == m_currentEditModel);
+        }
+    }
+    m_deleteQuantBtn->setEnabled(installed);
 }
 
 void ModelEditorWidget::updateModelButtons()
 {
+    updateDeleteQuantState();
     const bool installed = selectedFromInstalled();
     const bool creating = m_currentEditModel.isEmpty();
 
@@ -540,6 +733,16 @@ void ModelEditorWidget::onFromActivated(int index)
 {
     if (index < 0)
         return;
+
+    const QString name = m_fromCombo->currentData().toString();
+    if (!m_repo.id.isEmpty() && !name.isEmpty() && m_localModels.contains(name)
+            && name != m_currentEditModel) {
+        // Another installed quant of this repository: show its parameters.
+        loadModel(name);
+        return;
+    }
+
+    updateNameForSelection();
     updateModelButtons();
     if (!selectedFromInstalled())
         m_statusLabel->setText(T("editor.quantNotInstalled"));
@@ -570,19 +773,26 @@ void ModelEditorWidget::onFromContextMenu(const QPoint &pos)
 void ModelEditorWidget::setAvailableModels(const QStringList &models)
 {
     m_localModels = models;
-    rebuildFromCombo(m_fromCombo->currentText());
+    rebuildFromCombo(currentFromName());
+    updateNameForSelection();
 }
 
 void ModelEditorWidget::setCreateMode()
 {
+    m_repo = RepoGroup();
     m_currentEditModel.clear();
     m_family.clear();
     m_familyTags.clear();
+    m_modelStem.clear();
     rebuildFromCombo();
+    applyRepoModeToFrom();
+    updateSourceLabel();
     m_fromBlob.clear();
     m_createBtn->setVisible(true);
     m_updateBtn->setVisible(false);
     m_nameEdit->setReadOnly(false);
+    m_nameEdit->setEnabled(true);
+    m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
     m_nameEdit->clear();
     m_statusLabel->setText(T("editor.statusCreate"));
 
@@ -630,8 +840,57 @@ void ModelEditorWidget::setEditMode(const QString &modelName)
     updateModelRowVisibility();
     m_createBtn->setVisible(false);
     m_updateBtn->setVisible(true);
+    m_nameEdit->setEnabled(true);
+    m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
     m_nameEdit->setText(modelName);
     m_statusLabel->setText(T("editor.statusEdit").arg(modelName));
+}
+
+void ModelEditorWidget::onClear()
+{
+    // "Clear" on an installed repository goes back to its first quant instead
+    // of leaving the user on an empty screen.
+    if (!m_repo.id.isEmpty()) {
+        RepoGroup group = m_repo;
+        m_currentEditModel.clear();
+        loadRepo(group);
+        return;
+    }
+    setCreateMode();
+}
+
+void ModelEditorWidget::loadRepo(const RepoGroup &group)
+{
+    if (group.quants.isEmpty()) {
+        setCreateMode();
+        return;
+    }
+
+    m_repo = group;
+    m_familyTags.clear();
+    // Only the Ollama registry can supply extra quants; an HF repo only ever
+    // shows the quants that are already installed.
+    m_family = group.source == QLatin1String("ollama")
+            ? group.ref.section(QLatin1Char(':'), 0, 0)
+            : QString();
+    m_modelStem.clear();
+
+    updateSourceLabel();
+    applyRepoModeToFrom();
+
+    QString target = m_currentEditModel;
+    bool known = false;
+    for (const InstalledQuant &quant : group.quants) {
+        if (quant.modelName == target) {
+            known = true;
+            break;
+        }
+    }
+    if (!known)
+        target = group.quants.first().modelName;
+
+    rebuildFromCombo(target);
+    loadModel(target);
 }
 
 void ModelEditorWidget::loadModel(const QString &modelName)
@@ -656,10 +915,12 @@ void ModelEditorWidget::loadModel(const QString &modelName)
         else                                 baseFrom = m_fromBlob;
     }
     if (!baseFrom.isEmpty()) {
-        int idx = m_fromCombo->findText(baseFrom);
+        int idx = m_fromCombo->findData(baseFrom);
+        if (idx < 0)
+            idx = m_fromCombo->findText(baseFrom);
         if (idx >= 0)
             m_fromCombo->setCurrentIndex(idx);
-        else
+        else if (m_fromCombo->isEditable())
             m_fromCombo->setCurrentText(baseFrom);
     }
     m_fromCombo->blockSignals(false);
@@ -674,10 +935,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     if (params.parameters.contains("num_ctx")) {
         int wantK = qRound(params.parameters["num_ctx"].toInt() / 1024.0);
         m_numCtxSpin->setValue(wantK);
-        if (wantK > maxK)
-            m_numCtxSpin->setStyleSheet("QSpinBox { color: red; }");
-        else
-            m_numCtxSpin->setStyleSheet("");
+        tokens::setRole(m_numCtxSpin, wantK > maxK ? "danger" : "");
     }
 
     m_tempCheck->setChecked(params.parameters.contains("temperature"));
@@ -713,10 +971,17 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     if (hasSystem)
         m_systemPromptEdit->setPlainText(params.systemPrompt);
 
-    m_family = modelName.section(QLatin1Char(':'), 0, 0);
-    m_modelStem = stripQuantSuffix(modelName.section(QLatin1Char(':'), 1));
+    if (m_repo.id.isEmpty()) {
+        m_family = modelName.section(QLatin1Char(':'), 0, 0);
+        m_modelStem = stripQuantSuffix(modelName.section(QLatin1Char(':'), 1));
+    }
     setEditMode(modelName);
-    requestFamilyTags();
+    // The editor lists installed quants only, for both sources. Downloading
+    // another quant belongs to the discover tabs, where it has a proper state.
+    if (m_repo.id.isEmpty())
+        requestFamilyTags();
+    else
+        m_statusLabel->setText(T("editor.quantsInstalled").arg(m_repo.quants.size()));
 
     m_rendererEdit->setText(params.renderer);
     m_parserEdit->setText(params.parser);
@@ -739,7 +1004,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     }
     m_modelInfoLabel->setText(info.join(QStringLiteral("  ·  ")));
 
-    updateContextInfo(m_fromCombo->currentText(), params.contextLength);
+    updateContextInfo(currentFromName(), params.contextLength);
 
     m_statusLabel->setText(T("editor.statusLoaded")
         .arg(modelName, params.architecture, params.paramCount));
@@ -747,7 +1012,11 @@ void ModelEditorWidget::loadModel(const QString &modelName)
 
 void ModelEditorWidget::onFromChanged(const QString &baseModel)
 {
-    if (baseModel.isEmpty()) {
+    // The parameter is the visible text; the model name lives in the item data
+    // (they differ for renamed quants and for the size hints of registry tags).
+    const QString base = currentFromName();
+    const QString label = base.isEmpty() ? baseModel : base;
+    if (label.isEmpty()) {
         m_defaultCtxLabel->clear();
         m_maxCtxLabel->clear();
         m_baseMaxContext = 32768;
@@ -756,7 +1025,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         return;
     }
 
-    int maxCtx = maxContextForBase(baseModel);
+    int maxCtx = maxContextForBase(label);
     if (maxCtx > 0) {
         m_baseMaxContext = maxCtx;
         m_numCtxSlider->setMaximum(maxCtx / 1024);
@@ -771,15 +1040,13 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_numCtxSpin->setMaximum(1024);
     }
 
-    updateContextInfo(baseModel, maxCtx);
+    updateContextInfo(label, maxCtx);
 }
 
 void ModelEditorWidget::onNumCtxChanged(int value)
 {
-    if (m_baseMaxContext > 0 && value * 1024 > m_baseMaxContext)
-        m_numCtxSpin->setStyleSheet("QSpinBox { color: red; }");
-    else
-        m_numCtxSpin->setStyleSheet("");
+    tokens::setRole(m_numCtxSpin,
+                    (m_baseMaxContext > 0 && value * 1024 > m_baseMaxContext) ? "danger" : "");
 }
 
 void ModelEditorWidget::onPreview()
@@ -799,7 +1066,8 @@ void ModelEditorWidget::onPreview()
 
 void ModelEditorWidget::onCreate()
 {
-    if (!selectedFromInstalled() && !m_familyTags.isEmpty()) {
+    if (!selectedFromInstalled() && !m_familyTags.isEmpty()
+            && !m_fromCombo->currentData().toString().isEmpty()) {
         installSelectedQuant();
         return;
     }
@@ -831,13 +1099,25 @@ void ModelEditorWidget::onUpdate()
         QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
         return;
     }
-    QString name = m_nameEdit->text().trimmed();
-    if (name.isEmpty()) return;
+    const QString name = m_nameEdit->text().trimmed();
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnName"));
+        return;
+    }
 
     // Editing the name of an installed model means renaming, not creating a
-    // second copy with a different name.
-    if (!m_currentEditModel.isEmpty() && name != m_currentEditModel) {
-        emit renameRequested(m_currentEditModel, name);
+    // second copy with a different name. The parameters must follow the new
+    // name, so the two are sent together.
+    if (name != m_currentEditModel) {
+        if (m_localModels.contains(name)) {
+            QMessageBox::warning(this, T("editor.warnTitle"), T("editor.nameConflict"));
+            return;
+        }
+        // After the rename the old name is gone: the Modelfile must use the new
+        // one, otherwise `ollama create` would have nothing to inherit from.
+        config.from = name;
+        const QString content = ModelfileBuilder::build(config);
+        emit renameAndUpdateRequested(m_currentEditModel, name, content);
         return;
     }
 
@@ -848,7 +1128,7 @@ void ModelEditorWidget::onUpdate()
 ModelfileBuilder::Config ModelEditorWidget::collectConfig()
 {
     ModelfileBuilder::Config config;
-    config.from = m_fromCombo->currentText().trimmed();
+    config.from = currentFromName();
 
     config.enableNumCtx = m_numCtxCheck->isChecked();
     config.numCtx = m_numCtxSpin->value() * 1024;
@@ -947,10 +1227,10 @@ void ModelEditorWidget::setMaxCtxLabel(int maxCtx)
 void ModelEditorWidget::setAdvancedVisible(bool visible)
 {
     // Rows: 0 = FROM, 1 = name, 2 = renderer, 3 = parser.
-    // Creating a model always needs FROM; editing an installed one only shows
-    // the name until "Advanced" is expanded.
-    const bool creating = m_currentEditModel.isEmpty();
-    m_modelLayout->setRowVisible(0, visible || creating);
+    // FROM is the main field now (it lists the quants of the repository), so it
+    // is never hidden; "Advanced" only reveals the technical directives.
+    m_modelLayout->setRowVisible(0, true);
+    m_modelLayout->setRowVisible(1, true);
     m_modelLayout->setRowVisible(2, visible);
     m_modelLayout->setRowVisible(3, visible);
 }

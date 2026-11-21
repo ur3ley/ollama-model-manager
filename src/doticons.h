@@ -2,33 +2,59 @@
 #define DOTICONS_H
 
 #include <QColor>
+#include <QHash>
 #include <QIcon>
 #include <QPainter>
 #include <QPixmap>
 
-// Small round status dot: green = fits / ok, red = does not fit.
-inline QIcon dotIcon(bool fits)
+#include "memoryinfo.h"
+#include "theme.h"
+
+// Small round status dot: green = fits / ok, amber = fits but leaves little
+// headroom for the KV cache, red = does not fit, grey = unknown or not
+// installable. The colours come from the active palette, so the dots stay
+// legible in both themes.
+inline QIcon dotIcon(memoryinfo::Fit fit)
 {
-    static QIcon green;
-    static QIcon red;
-    auto make = [](const QColor &color) {
-        QPixmap pixmap(10, 10);
-        pixmap.fill(Qt::transparent);
-        QPainter painter(&pixmap);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(color);
-        painter.drawEllipse(1, 1, 8, 8);
-        return QIcon(pixmap);
-    };
-    if (fits) {
-        if (green.isNull())
-            green = make(QColor(QStringLiteral("#16a34a")));
-        return green;
+    static QHash<QString, QIcon> cache;
+    const theme::Palette &palette = theme::Theme::instance()->palette();
+    QColor color = palette.faint;
+    switch (fit) {
+    case memoryinfo::Fit::Yes:
+        color = palette.success;
+        break;
+    case memoryinfo::Fit::Tight:
+        color = palette.warning;
+        break;
+    case memoryinfo::Fit::No:
+        color = palette.danger;
+        break;
+    case memoryinfo::Fit::Unknown:
+        break;
     }
-    if (red.isNull())
-        red = make(QColor(QStringLiteral("#dc2626")));
-    return red;
+
+    const auto cached = cache.constFind(color.name());
+    if (cached != cache.constEnd())
+        return cached.value();
+
+    QPixmap pixmap(10, 10);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    painter.drawEllipse(1, 1, 8, 8);
+    painter.end();
+
+    const QIcon icon(pixmap);
+    cache.insert(color.name(), icon);
+    return icon;
+}
+
+// Kept for boolean uses such as the Ollama availability dot.
+inline QIcon dotIcon(bool ok)
+{
+    return dotIcon(ok ? memoryinfo::Fit::Yes : memoryinfo::Fit::No);
 }
 
 #endif // DOTICONS_H

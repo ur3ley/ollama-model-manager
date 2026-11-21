@@ -8,10 +8,10 @@
 
 namespace {
 
-QColor avatarColor(const QString &seed)
+QColor avatarColor(const QString &seed, const theme::Palette &p)
 {
     const int hue = int(qHash(seed) % 360);
-    return QColor::fromHsv(hue, 110, 190);
+    return QColor::fromHsv(hue, 110, p.isDark ? 165 : 190);
 }
 
 } // namespace
@@ -23,68 +23,73 @@ CardDelegate::CardDelegate(QObject *parent)
 
 QSize CardDelegate::sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const
 {
-    return QSize(0, 68);
+    return QSize(0, 72);
 }
 
 void CardDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                          const QModelIndex &index) const
 {
+    // The delegate outlives any single theme, so the palette is read on every
+    // paint() rather than cached in the constructor.
+    const theme::Palette &p = tokens::activePalette();
+
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    const QRect card = option.rect.adjusted(4, 3, -4, -3);
+    const QRect card = option.rect.adjusted(4, 4, -4, -4);
     const bool selected = option.state & QStyle::State_Selected;
     const bool hovered = option.state & QStyle::State_MouseOver;
 
-    const QColor background = selected ? QColor(tokens::CardSelected)
-                                       : hovered ? QColor(tokens::CardHover)
-                                                 : QColor(tokens::Card);
-    painter->setPen(QPen(selected ? QColor(tokens::Accent) : QColor(tokens::Border),
-                         selected ? 1.6 : 1.0));
+    const QColor background = selected ? p.selected : hovered ? p.cardHover : p.card;
+    painter->setPen(QPen(selected ? p.accent : p.border, selected ? 1.6 : 1.0));
     painter->setBrush(background);
-    painter->drawRoundedRect(card, tokens::CardRadius, tokens::CardRadius);
+    painter->drawRoundedRect(card, p.cardRadius, p.cardRadius);
 
     const QString title = index.data(cardrole::Title).toString();
     const QString subtitle = index.data(cardrole::Subtitle).toString();
     const QString stats = index.data(cardrole::Stats).toString();
 
-    const QRect avatar(card.left() + 10, card.center().y() - 15, 30, 30);
+    constexpr int avatarSide = 34;
+    const QRect avatar(card.left() + 12, card.center().y() - avatarSide / 2,
+                       avatarSide, avatarSide);
     painter->setPen(Qt::NoPen);
-    painter->setBrush(avatarColor(subtitle + title));
+    painter->setBrush(avatarColor(subtitle + title, p));
     painter->drawEllipse(avatar);
     QFont avatarFont = option.font;
+    avatarFont.setPixelSize(13);
     avatarFont.setBold(true);
     painter->setFont(avatarFont);
-    painter->setPen(Qt::white);
+    painter->setPen(p.onAccent);
     painter->drawText(avatar, Qt::AlignCenter, title.left(1).toUpper());
 
     QFont statsFont = option.font;
-    statsFont.setPointSizeF(qMax(7.0, statsFont.pointSizeF() - 0.5));
+    statsFont.setPixelSize(11);
     const QFontMetrics statsMetrics(statsFont);
     const int statsWidth = stats.isEmpty()
             ? 0
             : qMin(130, statsMetrics.horizontalAdvance(stats) + 14);
-    const QRect textRect = card.adjusted(50, 8, -statsWidth - 12, -8);
+    const QRect textRect = card.adjusted(avatarSide + 24, 10, -statsWidth - 12, -10);
 
     QFont titleFont = option.font;
+    titleFont.setPixelSize(13);
     titleFont.setBold(true);
     painter->setFont(titleFont);
-    painter->setPen(QColor(tokens::Text));
+    painter->setPen(p.text);
     const QFontMetrics titleMetrics(titleFont);
     painter->drawText(textRect, Qt::AlignLeft | Qt::AlignTop,
                       titleMetrics.elidedText(title, Qt::ElideRight, textRect.width()));
 
     QFont subtitleFont = option.font;
-    subtitleFont.setPointSizeF(qMax(7.0, subtitleFont.pointSizeF() - 1.0));
+    subtitleFont.setPixelSize(11);
     painter->setFont(subtitleFont);
-    painter->setPen(QColor(tokens::Muted));
+    painter->setPen(p.muted);
     const QFontMetrics subtitleMetrics(subtitleFont);
     painter->drawText(textRect.adjusted(0, 20, 0, 0), Qt::AlignLeft | Qt::AlignTop,
                       subtitleMetrics.elidedText(subtitle, Qt::ElideRight, textRect.width()));
 
     if (!stats.isEmpty()) {
         painter->setFont(statsFont);
-        painter->setPen(QColor(tokens::Muted));
+        painter->setPen(p.muted);
         painter->drawText(card.adjusted(card.width() - statsWidth - 8, 0, -12, 0),
                           Qt::AlignRight | Qt::AlignVCenter, stats);
     }

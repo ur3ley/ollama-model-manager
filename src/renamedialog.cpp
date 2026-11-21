@@ -3,6 +3,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QRegularExpressionValidator>
+#include "designtokens.h"
 #include "i18n.h"
 
 RenameDialog::RenameDialog(const QString &oldName, const QStringList &existingModels,
@@ -31,7 +32,8 @@ void RenameDialog::setupUI(const QString &oldName)
     layout->addLayout(formLayout);
 
     m_warningLabel = new QLabel();
-    m_warningLabel->setStyleSheet("color: red; font-size: 11px;");
+    tokens::setRole(m_warningLabel, "danger");
+    tokens::setCaption(m_warningLabel);
     m_warningLabel->setVisible(false);
     layout->addWidget(m_warningLabel);
 
@@ -43,7 +45,7 @@ void RenameDialog::setupUI(const QString &oldName)
     btnLayout->addWidget(m_cancelBtn);
     m_renameBtn = new QPushButton(T("rename.rename"));
     m_renameBtn->setEnabled(false);
-    m_renameBtn->setStyleSheet("QPushButton { font-weight: bold; }");
+    m_renameBtn->setProperty("accent", true);
     btnLayout->addWidget(m_renameBtn);
     layout->addLayout(btnLayout);
 

@@ -15,6 +15,7 @@
 class TokenManager;
 class ProxyService;
 class DiscoverPanel;
+class StartPageHeader;
 class QTabWidget;
 class QTimer;
 
@@ -41,7 +42,7 @@ public slots:
     void showProxyDialog();
 
 private slots:
-    void onModelSelected(const QString &modelName);
+    void onRepoSelected(const QString &id);
     void onNewModel();
     void onDeleteModel(const QString &modelName);
     void onRenameModel(const QString &modelName);
@@ -50,15 +51,23 @@ private slots:
     void onCreateModel(const QString &name, const QString &modelfileContent);
     void onUpdateModel(const QString &name, const QString &modelfileContent);
     void onRenameModelDirect(const QString &oldName, const QString &newName);
+    void onRenameAndUpdateModel(const QString &oldName, const QString &newName,
+                                const QString &modelfileContent);
     void onRefreshAll();
     void onManageTokens();
+    /** Restore provenance for one installed model without reinstalling it. */
+    void onBindSourceRequested(const QString &modelName);
+    /** Batch pass over every local card ("Tools → find sources automatically"). */
+    void onAutoFindSources();
 
 private:
     void setupUI();
     void setupMenuBar();
     void buildLanguageMenu();
+    void syncThemeActions();
     void retranslateUi();
-    void checkOllamaAvailable();
+    /** Rename a quant, moving its provenance entry; content is applied afterwards. */
+    void startRename(const QString &oldName, const QString &newName, const QString &content);
 
     void closeEvent(QCloseEvent *event) override;
 
@@ -73,11 +82,21 @@ private:
     QTabWidget *m_tabs = nullptr;
     DiscoverPanel *m_ollamaPanel = nullptr;
     QTimer *m_editDebounce = nullptr;
-    QString m_pendingEditModel;
+    QString m_pendingRepoId;
+    QString m_pendingSelectRepo;
+    /** After binding, select the card that now contains this model name. */
+    QString m_pendingSelectModel;
+    QString m_renameOld;
+    QString m_renameNew;
+    QString m_renameSelectId;
+    QString m_renameContent;
     DiscoverPanel *m_hfPanel = nullptr;
+    StartPageHeader *m_hero = nullptr;
     QSplitter *m_splitter;
 
     QMenu *m_fileMenu;
+    QMenu *m_viewMenu = nullptr;
+    QMenu *m_themeMenu = nullptr;
     QMenu *m_languageMenu;
     QMenu *m_toolsMenu;
     QMenu *m_helpMenu;
@@ -88,8 +107,14 @@ private:
     QAction *m_quitAction;
     QAction *m_tokensAction;
     QAction *m_proxyAction;
+    QAction *m_hfTokenAction = nullptr;
+    QAction *m_findSourcesAction;
     QAction *m_aboutAction;
     QActionGroup *m_langGroup;
+    QActionGroup *m_themeGroup = nullptr;
+    QAction *m_themeSystemAction = nullptr;
+    QAction *m_themeLightAction = nullptr;
+    QAction *m_themeDarkAction = nullptr;
 };
 
 #endif // MAINWINDOW_H

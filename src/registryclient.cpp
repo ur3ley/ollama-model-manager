@@ -11,11 +11,11 @@ namespace {
 
 const char *kLibraryBase = "https://ollama.com";
 
-QString stripTags(const QString &html)
+// Decodes the HTML entities the library pages actually use, without touching
+// whitespace: the readme textarea stores markdown, where newlines matter.
+QString decodeEntities(const QString &input)
 {
-    static const QRegularExpression tagRe(QStringLiteral("<[^>]*>"));
-    QString text = html;
-    text.remove(tagRe);
+    QString text = input;
     text.replace(QLatin1String("&nbsp;"), QLatin1String(" "));
     text.replace(QLatin1String("&amp;"), QLatin1String("&"));
     text.replace(QLatin1String("&lt;"), QLatin1String("<"));
@@ -55,7 +55,15 @@ QString stripTags(const QString &html)
         decoded += text.mid(last);
         text = decoded;
     }
-    return text.simplified();
+    return text;
+}
+
+QString stripTags(const QString &html)
+{
+    static const QRegularExpression tagRe(QStringLiteral("<[^>]*>"));
+    QString text = html;
+    text.remove(tagRe);
+    return decodeEntities(text).simplified();
 }
 
 QString compactNumber(quint64 value)
@@ -170,6 +178,64 @@ void RegistryClient::listTags(const QString &family)
             return;
         }
         emit tagsFinished(true, parseTags(QString::fromUtf8(reply->readAll())), QString());
+    });
+}
+
+void RegistryClient::fetchModelDetails(const QString &family)
+{
+    if (family.isEmpty())
+        return;
+    const auto cached = m_modelCache.constFind(family);
+    if (cached != m_modelCache.constEnd()) {
+        emit modelDetailsReady(family, cached.value(), true);
+        return;
+    }
+
+    disposeReply(m_modelDetails, this);
+
+    const QString url = QString::fromLatin1(kLibraryBase) + QStringLiteral("/library/") + family;
+    QNetworkReply *reply = get(url);
+    m_modelDetails = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, family]() {
+        if (m_modelDetails == reply)
+            m_modelDetails = nullptr;
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit modelDetailsReady(family, {}, false);
+            return;
+        }
+        const ModelDetails details = parseModelPage(QString::fromUtf8(reply->readAll()));
+        m_modelCache.insert(family, details);
+        emit modelDetailsReady(family, details, true);
+    });
+}
+
+void RegistryClient::fetchTagDetails(const QString &ref)
+{
+    if (ref.isEmpty())
+        return;
+    const auto cached = m_tagCache.constFind(ref);
+    if (cached != m_tagCache.constEnd()) {
+        emit tagDetailsReady(ref, cached.value(), true);
+        return;
+    }
+
+    disposeReply(m_tagDetails, this);
+
+    const QString url = QString::fromLatin1(kLibraryBase) + QStringLiteral("/library/") + ref;
+    QNetworkReply *reply = get(url);
+    m_tagDetails = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, ref]() {
+        if (m_tagDetails == reply)
+            m_tagDetails = nullptr;
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit tagDetailsReady(ref, {}, false);
+            return;
+        }
+        const TagDetails details = parseTagPage(QString::fromUtf8(reply->readAll()));
+        m_tagCache.insert(ref, details);
+        emit tagDetailsReady(ref, details, true);
     });
 }
 
@@ -299,6 +365,101 @@ QList<RegistryClient::Tag> RegistryClient::parseTags(const QString &html)
         tags.append(tag);
     }
     return tags;
+}
+
+RegistryClient::ModelDetails RegistryClient::parseModelPage(const QString &html)
+{
+    ModelDetails details;
+    if (html.isEmpty())
+        return details;
+
+    // Everything above the readme block describes the model; the readme itself
+    // can contain numbers like "30B" that must not end up in the size list.
+    const int readmeAt = html.indexOf(QLatin1String("id=\"display\""));
+    const QString head = readmeAt > 0 ? html.left(readmeAt) : html;
+
+    static const QRegularExpression metaRe(
+        QStringLiteral("<meta[^>]*property=\"og:description\"[^>]*>"));
+    static const QRegularExpression contentRe(QStringLiteral("content=\"([^\"]*)\""));
+    const QRegularExpressionMatch meta = metaRe.match(html);
+    if (meta.hasMatch()) {
+        const QRegularExpressionMatch content = contentRe.match(meta.captured(0));
+        if (content.hasMatch())
+            details.description = decodeEntities(content.captured(1)).trimmed();
+    }
+
+    // `ollama.com` keeps the editable markdown in a hidden textarea; the
+    // rendered copy in `div#display` is the fallback when the textarea is
+    // empty (older pages).
+    static const QRegularExpression editorRe(
+        QStringLiteral("<textarea[^>]*id=\"editor\"[^>]*>([\\s\\S]*?)</textarea\\s*>"));
+    const QRegularExpressionMatch editor = editorRe.match(html);
+    if (editor.hasMatch()) {
+        details.readmeMarkdown = decodeEntities(editor.captured(1)).trimmed();
+    }
+
+    static const QRegularExpression displayRe(
+        QStringLiteral("<div\\s+id=\"display\"[^>]*>([\\s\\S]*?)</div\\s*>"));
+    const QRegularExpressionMatch display = displayRe.match(html);
+    if (display.hasMatch()) {
+        const QString text = stripTags(display.captured(1)).trimmed();
+        if (details.readmeMarkdown.isEmpty())
+            details.readmeMarkdown = text;
+        if (details.description.isEmpty())
+            details.description = text;
+    }
+
+    static const QRegularExpression updatedRe(
+        QStringLiteral("Updated[\\s\\S]{0,80}?(\\d+\\s+\\w+\\s+ago)"));
+    const QRegularExpressionMatch updated = updatedRe.match(html);
+    if (updated.hasMatch())
+        details.updated = updated.captured(1).simplified();
+
+    details.capabilities = capabilitiesIn(head);
+
+    static const QRegularExpression sizeRe(QStringLiteral(">(\\d+(?:\\.\\d+)?[bm])<"));
+    QRegularExpressionMatchIterator sizes = sizeRe.globalMatch(head);
+    while (sizes.hasNext()) {
+        const QString size = sizes.next().captured(1);
+        if (!details.sizes.contains(size))
+            details.sizes.append(size);
+    }
+    return details;
+}
+
+RegistryClient::TagDetails RegistryClient::parseTagPage(const QString &html)
+{
+    TagDetails details;
+    if (html.isEmpty())
+        return details;
+
+    // `<span class="hidden sm:block">arch</span><span class="…">qwen3moe</span>`
+    auto spanValue = [&html](const char *key) {
+        const QRegularExpression re(QStringLiteral(">%1</span>\\s*<span[^>]*>([^<]+)<")
+                                    .arg(QLatin1String(key)));
+        const QRegularExpressionMatch match = re.match(html);
+        return match.hasMatch() ? decodeEntities(match.captured(1)).trimmed() : QString();
+    };
+    details.architecture = spanValue("arch");
+    details.parameters = spanValue("parameters");
+    details.quantization = spanValue("quantization");
+
+    // The license row links the blob and prints the full text next to it; the
+    // first line is the license name ("Apache License").
+    static const QRegularExpression licenseRe(QStringLiteral(
+        "<a href=\"[^\"]*/blobs/[^\"]*\">\\s*license\\s*</a>\\s*</div>\\s*<div[^>]*>([\\s\\S]*?)</div>"));
+    const QRegularExpressionMatch license = licenseRe.match(html);
+    if (license.hasMatch()) {
+        const QStringList lines = decodeEntities(license.captured(1)).split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            const QString text = stripTags(line).trimmed();
+            if (!text.isEmpty()) {
+                details.license = text;
+                break;
+            }
+        }
+    }
+    return details;
 }
 
 void RegistryClient::checkManifest(const QString &ref)

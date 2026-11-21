@@ -20,6 +20,7 @@
 #include "mainwindow.h"
 #include "proxyservice.h"
 #include "proxysettings.h"
+#include "theme.h"
 #include "tokenmanager.h"
 #include "trayicon.h"
 
@@ -138,17 +139,11 @@ int main(int argc, char *argv[])
     if (auto *guiApp = qobject_cast<QApplication *>(&app)) {
         // Без окна приложение не должно завершаться: прокси живёт в трее.
         guiApp->setQuitOnLastWindowClosed(false);
-        guiApp->setStyleSheet(
-            "QToolTip {"
-            "  max-width: 420px;"
-            "  padding: 6px 10px;"
-            "  border: 1px solid #888;"
-            "  border-radius: 4px;"
-            "  background: #fffef2;"
-            "  color: #222;"
-            "  font-size: 12px;"
-            "}");
     }
+
+    // Оформление (Fusion + палитра + QSS) — до создания окон, чтобы окно
+    // никогда не показалось в системном стиле, а затем перекрасилось.
+    theme::apply();
 
     I18n::instance()->setLanguagesDir(findLanguagesDir());
     QString saved = QSettings().value("language", "en").toString();

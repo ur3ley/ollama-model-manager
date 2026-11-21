@@ -1,9 +1,12 @@
 #ifndef MODELBROWSERPANEL_H
 #define MODELBROWSERPANEL_H
 
+#include <QHash>
 #include <QList>
 #include <QStringList>
 #include <QWidget>
+
+#include "memoryinfo.h"
 
 class QComboBox;
 class QLabel;
@@ -11,16 +14,39 @@ class QListWidget;
 class QListWidgetItem;
 class QProgressBar;
 class QPushButton;
+class QTextBrowser;
 class QTimer;
+class QToolButton;
 
 struct BrowserVariant {
     QString id;      // what to install: family:tag or repo/file
     QString label;   // shown in the combo: UD-Q4_K_XL
     QString size;    // 24 GB
     QString hint;    // disabled reason, empty when selectable
+    QString context; // 40K — context window from the tag page
+    QString input;   // Text / Vision
     bool enabled = true;
+    bool installed = false;        // a local copy exists ("скачано")
+    bool updateAvailable = false;  // installed, but the source has a newer build
     quint64 sizeBytes = 0;
-    bool fitsMemory = true;
+    memoryinfo::Fit fit = memoryinfo::Fit::Unknown;
+};
+
+// "What is this model": the long blurb, the readme and the update age from the
+// family page. Source-agnostic on purpose — the window fills it from either
+// ollama.com or (later) a HuggingFace model card.
+struct BrowserAbout {
+    QString description;
+    QString readmeMarkdown;
+    QString updated;   // "1 year ago"
+};
+
+// Per-quantization facts from the tag page.
+struct BrowserSpecs {
+    QString architecture;  // qwen3moe
+    QString parameters;    // 30.5B
+    QString quantization;  // Q4_K_M
+    QString license;       // Apache License
 };
 
 struct BrowserItem {
@@ -32,12 +58,15 @@ struct BrowserItem {
     QString stats;         // "↓ 494.7K · ♥ 327 · 2h ago"
     QList<BrowserVariant> variants;
     bool variantsLoaded = false;
+    BrowserAbout about;
+    bool aboutLoaded = false;
+    QHash<QString, BrowserSpecs> specs;  // keyed by variant id
 };
 
 // "Model hub" style browser: a card list on the left, a detail pane on the
-// right (title, badges, variant picker, download button, description).
-// Source-agnostic: the dialog feeds it either ollama.com families or
-// HuggingFace repositories.
+// right (title, badges, characteristics, readme, variant picker, download
+// button, description). Source-agnostic: the dialog feeds it either
+// ollama.com families or HuggingFace repositories.
 class ModelBrowserPanel : public QWidget
 {
     Q_OBJECT
@@ -48,6 +77,17 @@ public:
     void clearItems();
     void setVariants(const QString &itemId, const QList<BrowserVariant> &variants);
     void setVariantsError(const QString &itemId, const QString &error);
+    /**
+     * Update the install state of one variant in place (no list rebuild, so the
+     * user's current pick survives an async update check).
+     */
+    void setVariantState(const QString &itemId, const QString &variantId,
+                         bool installed, bool updateAvailable);
+    /** Family page data: readme, long description, "updated … ago". */
+    void setModelDetails(const QString &itemId, const BrowserAbout &about);
+    /** Tag page data for one variant; ignored for a variant of another item. */
+    void setTagDetails(const QString &itemId, const QString &variantId,
+                       const BrowserSpecs &specs);
     /** Append a suffix to one variant's label (e.g. "update available"). */
     void patchVariant(const QString &itemId, const QString &variantId, const QString &suffix);
     void selectItem(int row);
@@ -57,20 +97,35 @@ public:
     int variantCount() const;
     QString selectedItemId() const;
     QString selectedVariantId() const;
+    /** Declared download size text of the selected variant ("39GB"), empty when unknown. */
+    QString selectedVariantSizeText() const;
     void setActionText(const QString &text);
-    void setBusy(bool busy, int percent);
+    /** percent < 0 shows an indeterminate bar (total download size unknown). */
+    void setBusy(bool busy, int percent, bool cancellable = true);
     void setStatus(const QString &status);
     void setEmptyText(const QString &text);
+    /** Expand/collapse the "About this model" block (dev aid + tests). */
+    void setAboutExpanded(bool expanded);
+    bool isAboutExpanded() const;
 
 signals:
     void itemSelected(const QString &itemId);
+    void variantSelected(const QString &itemId, const QString &variantId);
     void actionRequested(const QString &itemId, const QString &variantId);
     void cancelRequested();
 
 private:
     void updateDetail();
+    void updateSpecs();
+    void updateAbout();
+    void applyAboutStyle();
+    void requestCurrentVariant();
     void appendBatch();
     void updateActionState();
+    void applyVariantColors();
+    /** Combo row text for one variant: label · size · state mark · fit hint. */
+    QString variantLabel(const BrowserVariant &variant) const;
+    void updateVariantRow(int row, const BrowserVariant &variant);
     const BrowserItem *itemById(const QString &id) const;
     BrowserItem *itemById(const QString &id);
 
@@ -80,13 +135,17 @@ private:
     QLabel *m_subtitleLabel;
     QWidget *m_badgesRow;
     QLabel *m_statsLabel;
+    QLabel *m_specsLabel;
     QLabel *m_descriptionLabel;
+    QToolButton *m_aboutToggle;
+    QTextBrowser *m_about;
     QComboBox *m_variantCombo;
     QLabel *m_variantSize;
     QPushButton *m_actionBtn;
     QPushButton *m_cancelBtn;
     QProgressBar *m_progress;
     QLabel *m_statusLabel;
+    QList<QLabel *> m_chips; // capability badges, restyled on theme change
 
     QTimer *m_batchTimer = nullptr;
     QList<BrowserItem> m_pendingItems;
@@ -94,7 +153,10 @@ private:
     QList<BrowserItem> m_items;
     QString m_selectedId;
     QString m_actionText;
+    QString m_requestedVariant; // item:variant already asked for
+    QString m_renderedMarkdown; // readme currently in m_about
     bool m_busy = false;
+    bool m_busyCancellable = true;
 };
 
 #endif // MODELBROWSERPANEL_H

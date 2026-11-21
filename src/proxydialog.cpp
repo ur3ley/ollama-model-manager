@@ -1,5 +1,6 @@
 #include "proxydialog.h"
 
+#include "designtokens.h"
 #include "i18n.h"
 #include "proxyservice.h"
 #include "tlsmanager.h"
@@ -153,7 +154,7 @@ ProxyDialog::ProxyDialog(ProxyService *service, QWidget *parent)
 
     m_tlsNoteLabel = new QLabel(this);
     m_tlsNoteLabel->setWordWrap(true);
-    m_tlsNoteLabel->setStyleSheet(QStringLiteral("color: #666;"));
+    tokens::setMuted(m_tlsNoteLabel);
     tlsForm->addRow(m_tlsNoteLabel);
 
     m_hintLabel = new QLabel(this);
@@ -302,11 +303,10 @@ void ProxyDialog::updateTlsUi()
                       && expiry.toUTC() <= QDateTime::currentDateTimeUtc().addDays(14);
     if (valid) {
         m_tlsExpiryLabel->setText(expiry.toLocalTime().toString(QStringLiteral("yyyy-MM-dd")));
-        m_tlsExpiryLabel->setStyleSheet(soon ? QStringLiteral("color: #c00;")
-                                             : QString());
+        tokens::setRole(m_tlsExpiryLabel, soon ? "danger" : "");
     } else {
         m_tlsExpiryLabel->setText(T("proxy.tlsExpiryUnknown"));
-        m_tlsExpiryLabel->setStyleSheet(QString());
+        tokens::setRole(m_tlsExpiryLabel, "");
     }
 
     if (mode == ProxySettings::TlsMode::LetsEncrypt)
@@ -346,8 +346,8 @@ void ProxyDialog::updateHint()
         }
     }
 
-    m_hintLabel->setStyleSheet(error ? QStringLiteral("color: #c00;")
-                                     : QStringLiteral("color: #666;"));
+    tokens::setRole(m_hintLabel, error ? "danger" : "");
+    tokens::setMuted(m_hintLabel, !error);
     m_hintLabel->setText(hint.isEmpty() ? T("proxy.describe").arg(settings.describe()) : hint);
     m_applyButton->setEnabled(!error);
 }
@@ -395,8 +395,7 @@ void ProxyDialog::onRenewCertificate()
 
 void ProxyDialog::setResult(const QString &text, bool error)
 {
-    m_resultLabel->setStyleSheet(error ? QStringLiteral("color: #c00;")
-                                       : QStringLiteral("color: #080;"));
+    tokens::setRole(m_resultLabel, error ? "danger" : "success");
     m_resultLabel->setText(text);
 }
 

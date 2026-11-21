@@ -364,7 +364,7 @@ void OllamaCli::listModelsAsync()
     process->start(m_ollamaPath, {QStringLiteral("list")});
 }
 
-void OllamaCli::pullModelAsync(const QString &name)
+void OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
 {
     if (m_pull) {
         m_pull->kill();
@@ -373,7 +373,10 @@ void OllamaCli::pullModelAsync(const QString &name)
     }
 
     m_pullBuffer.clear();
-    m_lastPullStatus.clear();
+    m_pullParser.reset();
+    m_pullParser.setExpectedBytes(expectedBytes);
+    m_lastPullLabel.clear();
+    m_lastPullReceived = -1;
     m_lastPullPercent = -2;
     auto *process = new QProcess(this);
     m_pull = process;
@@ -385,33 +388,18 @@ void OllamaCli::pullModelAsync(const QString &name)
         m_pullBuffer += QString::fromUtf8(m_pull->readAll());
         int newline;
         while ((newline = m_pullBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
-            QString line = m_pullBuffer.left(newline);
+            const QString line = m_pullBuffer.left(newline);
             m_pullBuffer.remove(0, newline + 1);
-            // Strip ANSI escapes and carriage-return redraws.
-            line.remove(QRegularExpression(QStringLiteral("\x1b\\[[0-9;?]*[A-Za-z]")));
-            line = line.trimmed();
-            if (line.isEmpty())
+            // ANSI escapes and '\r' redraws are handled by the parser.
+            const PullProgressParser::Update update = m_pullParser.feed(line);
+            if (update.percent == m_lastPullPercent
+                    && update.label == m_lastPullLabel
+                    && update.received == m_lastPullReceived)
                 continue;
-
-            static const QRegularExpression percentRe(QStringLiteral("(\\d+)%"));
-            const QRegularExpressionMatch percentMatch = percentRe.match(line);
-            const int percent = percentMatch.hasMatch() ? percentMatch.captured(1).toInt() : -1;
-
-            QString status = line;
-            static const QRegularExpression sizeRe(
-                QStringLiteral("(\\d+(?:\\.\\d+)?\\s*[KMG]B)\\s*/\\s*(\\d+(?:\\.\\d+)?\\s*[KMG]B)"));
-            const QRegularExpressionMatch sizeMatch = sizeRe.match(line);
-            if (sizeMatch.hasMatch())
-                status = sizeMatch.captured(1) + QStringLiteral(" / ") + sizeMatch.captured(2);
-            else if (line.startsWith(QLatin1String("pulling ")))
-                status = line.section(QLatin1Char(':'), 0, 0);
-
-            // Ollama redraws the same line many times; emit only changes.
-            if (status == m_lastPullStatus && percent == m_lastPullPercent)
-                continue;
-            m_lastPullStatus = status;
-            m_lastPullPercent = percent;
-            emit pullProgress(status, percent);
+            m_lastPullPercent = update.percent;
+            m_lastPullLabel = update.label;
+            m_lastPullReceived = update.received;
+            emit pullProgress(update.label, update.percent, update.received, update.total);
         }
     };
 
@@ -419,11 +407,24 @@ void OllamaCli::pullModelAsync(const QString &name)
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [this, process, handleChunk](int exitCode, QProcess::ExitStatus status) {
         handleChunk();
+        // The last line often has no trailing newline ("success").
+        if (!m_pullBuffer.trimmed().isEmpty()) {
+            const PullProgressParser::Update update = m_pullParser.feed(m_pullBuffer);
+            m_pullBuffer.clear();
+            emit pullProgress(update.label, update.percent, update.received, update.total);
+        }
         const QString output = QString::fromUtf8(process->readAll()).trimmed();
         if (m_pull == process)
             m_pull = nullptr;
         process->deleteLater();
-        emit pullFinished(exitCode == 0 && status == QProcess::NormalExit, output);
+        const bool ok = exitCode == 0 && status == QProcess::NormalExit;
+        if (ok) {
+            // Ollama redraws over the last frames, so the biggest layer may end
+            // at 99%: the exit code is what makes the bar full.
+            const PullProgressParser::Update update = m_pullParser.markComplete();
+            emit pullProgress(update.label, update.percent, update.received, update.total);
+        }
+        emit pullFinished(ok, output);
     });
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {

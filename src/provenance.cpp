@@ -94,3 +94,16 @@ void Provenance::remove(const QString &modelName)
     m_data.remove(modelName);
     save();
 }
+
+void Provenance::rename(const QString &oldName, const QString &newName)
+{
+    if (oldName.isEmpty() || newName.isEmpty() || oldName == newName)
+        return;
+    if (!m_data.contains(oldName))
+        return;
+
+    // take() keeps the whole entry, so ref/file/digest/sha/installedAt survive.
+    const QJsonValue entry = m_data.take(oldName);
+    m_data.insert(newName, entry);
+    save();
+}

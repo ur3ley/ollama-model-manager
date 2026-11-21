@@ -1,11 +1,13 @@
 #ifndef DISCOVERPANEL_H
 #define DISCOVERPANEL_H
 
+#include <QHash>
 #include <QList>
 #include <QSet>
 #include <QWidget>
 
 #include "hfclient.h"
+#include "hfvariants.h"
 #include "modelfilters.h"
 #include "registryclient.h"
 
@@ -28,8 +30,14 @@ public:
 
     explicit DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent = nullptr);
 
+    /** HuggingFace token dialog (opened from the Tools menu). */
+    void openTokenDialog();
+
     /** Load the initial "popular" list. */
     void activate();
+
+    /** Put the keyboard focus into the query field (hero "download" action). */
+    void focusSearch();
 
     // Hooks for the offscreen smoke test.
     void searchAs(const QString &query);
@@ -52,19 +60,52 @@ private slots:
     void onCancel();
     void onDownloadProgress(qint64 received, qint64 total);
     void onDownloadFinished(bool ok, const QString &path, const QString &error);
-    void onPullProgress(const QString &status, int percent);
+    void onPullProgress(const QString &label, int percent, qint64 received, qint64 total);
     void onPullFinished(bool ok, const QString &output);
 
 private:
     void setupUi();
     void rebuildItems();
     void openFilters();
+    void ensureHfToken();
+    /** 401 from the Hub: append the "use the Token… button" hint. */
+    QString hfErrorText(const QString &error) const;
     void updateFilterButton();
     void refreshInstalled();
     void applySort(QList<RegistryClient::Model> &models) const;
     QString hfSortKey() const;
 
+    // Install/update marks for the variant picker. The panel itself only knows
+    // the state flags; the source decides how to establish them.
+    /** Push the stored flags of every Ollama variant of `itemId` into the panel. */
+    void applyOllamaState(const QString &itemId, const QString &ref);
+    /** Queue manifest checks for the installed tags (one request at a time). */
+    void checkOllamaUpdates(const QString &itemId, const QStringList &refs);
+    void startNextUpdateCheck();
+    /** Push the stored flags of every HF variant of `repo` into the panel. */
+    void applyHfStates(const QString &repo);
+    /** Ask for the current commit of `repo` once per session. */
+    void ensureRepoInfo(const QString &repo);
+    /**
+     * Is one repository variant installed? Provenance is the authority: a model
+     * may have been renamed (or created under an older naming scheme), so the
+     * generated name alone is not an identity. On success `installedSha`
+     * receives the commit the local copy came from.
+     */
+    bool hfVariantInstalled(const QString &repo, const QString &firstFile,
+                            const QString &localName, QString *installedSha) const;
+
     bool isOllama() const { return m_source == Source::Ollama; }
+
+    // HuggingFace download queue: a split quant arrives as N files, downloaded
+    // one after another into the same folder so the Modelfile can point at a
+    // wildcard over the original shard names.
+    void startHfDownload(const QString &repo, const HfVariant &variant);
+    void startNextPart();
+    void finishHfDownload();
+    void stopHfQueue();
+    /** Rebuild the picker from m_hfVariants (installed marks, new language). */
+    void applyHfVariants(const QString &itemId);
 
     Source m_source;
     OllamaCli *m_cli;
@@ -80,12 +121,36 @@ private:
 
     QList<RegistryClient::Model> m_ollamaResults;
     QList<HfClient::Repo> m_hfResults;
+    QList<HfVariant> m_hfVariants;  // variants of m_pendingRepo, for the queue
     ModelFilters m_filters;
     QSet<QString> m_installedNames;
+    QHash<QString, QString> m_localIds;        // installed name -> `ollama list` id
+    QHash<QString, QString> m_manifestDigests; // ollama ref -> registry digest (session)
+    QStringList m_updateQueue;                 // refs whose manifest is still to check
+    QString m_updateItemId;                    // family those refs belong to
+    QHash<QString, QString> m_repoShas;        // hf repo -> current commit (session)
+    QSet<QString> m_repoInfoRequested;         // repo info already asked for
     QString m_pendingItemId;
     QString m_pendingRepo;
     QString m_pendingFile;
     QString m_pullingName;
+    // Set while `ollama create` runs for a freshly downloaded GGUF: the model
+    // is not "installed" until that process finishes successfully.
+    QString m_pendingCreateName;
+    QString m_pendingCreateRepo;
+    QString m_pendingCreateFile;
+    bool m_tokenLoaded = false;    // wallet read already attempted
+
+    QStringList m_queueFiles;      // parts still to download, part order
+    QList<qint64> m_queueSizes;    // planned bytes per part (0 when unknown)
+    QString m_queueFirstFile;
+    QString m_queueLastPath;       // path of the last completed part
+    int m_queueIndex = 0;
+    qint64 m_queueDoneBytes = 0;
+    qint64 m_queueTotalBytes = 0;
+    qint64 m_queuePartTotal = 0;   // total reported for the current part
+    bool m_queueActive = false;
+    bool m_cancelRequested = false;
     bool m_loaded = false;
 };
 

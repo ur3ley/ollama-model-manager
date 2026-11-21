@@ -8,6 +8,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "pullprogress.h"
+
 class OllamaCli : public QObject
 {
     Q_OBJECT
@@ -58,8 +60,12 @@ public:
     /** Rename in place: copy to the new name, then remove the old one. */
     void renameModelAsync(const QString &oldName, const QString &newName);
 
-    /** Pull a model from the Ollama registry; progress comes as CLI output. */
-    void pullModelAsync(const QString &name);
+    /**
+     * Pull a model from the Ollama registry; progress comes as CLI output.
+     * `expectedBytes` is the known download size of the tag (0 when unknown);
+     * it is used as the denominator of the aggregate progress percentage.
+     */
+    void pullModelAsync(const QString &name, qint64 expectedBytes = 0);
     void cancelPull();
     bool isPulling() const;
 
@@ -70,7 +76,8 @@ signals:
     void renameFinished(bool success, const QString &output);
 
     void modelsListed(bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error);
-    void pullProgress(const QString &status, int percent);
+    /** Aggregated pull progress: percent is -1 while the total is unknown. */
+    void pullProgress(const QString &label, int percent, qint64 received, qint64 total);
     void pullFinished(bool success, const QString &output);
 
 private:
@@ -82,7 +89,9 @@ private:
     QProcess *m_list = nullptr;
     QProcess *m_pull = nullptr;
     QString m_pullBuffer;
-    QString m_lastPullStatus;
+    PullProgressParser m_pullParser;
+    QString m_lastPullLabel;
+    qint64 m_lastPullReceived = -1;
     int m_lastPullPercent = -2;
 };
 

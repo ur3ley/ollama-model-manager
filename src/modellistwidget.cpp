@@ -1,13 +1,34 @@
 #include "modellistwidget.h"
+
 #include "carddelegate.h"
-#include "designtokens.h"
+#include "memoryinfo.h"
+#include "provenance.h"
+#include "theme.h"
+
+#include <QApplication>
+#include <QHash>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QListWidget>
 #include <QMenu>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QApplication>
+#include <QSignalBlocker>
 #include <QStyle>
+
+namespace {
+
+QString formatSize(quint64 bytes)
+{
+    constexpr double gb = 1024.0 * 1024.0 * 1024.0;
+    const double gib = double(bytes) / gb;
+    if (gib >= 1024.0)
+        return QString::number(gib / 1024.0, 'f', 1) + QStringLiteral(" TB");
+    if (gib >= 1.0)
+        return QString::number(gib, 'f', gib < 10.0 ? 1 : 0) + QStringLiteral(" GB");
+    const double mib = double(bytes) / (1024.0 * 1024.0);
+    return QString::number(mib, 'f', 0) + QStringLiteral(" MB");
+}
+
+} // namespace
 
 ModelListWidget::ModelListWidget(OllamaCli *cli, QWidget *parent)
     : QWidget(parent), m_cli(cli)
@@ -16,6 +37,7 @@ ModelListWidget::ModelListWidget(OllamaCli *cli, QWidget *parent)
     connect(m_cli, &OllamaCli::createFinished, this, &ModelListWidget::refresh);
     connect(m_cli, &OllamaCli::deleteFinished, this, &ModelListWidget::refresh);
     connect(m_cli, &OllamaCli::copyFinished, this, &ModelListWidget::refresh);
+    connect(m_cli, &OllamaCli::renameFinished, this, &ModelListWidget::refresh);
     connect(m_cli, &OllamaCli::modelsListed, this,
             [this](bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error) {
         Q_UNUSED(error);
@@ -59,32 +81,20 @@ void ModelListWidget::setupUI()
     m_list->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(m_list, 1);
 
-    auto *btnLayout = new QHBoxLayout();
-    m_newBtn = new QPushButton();
-    btnLayout->addWidget(m_newBtn);
-    m_importBtn = new QPushButton();
-    btnLayout->addWidget(m_importBtn);
-    m_deleteBtn = new QPushButton();
-    m_deleteBtn->setEnabled(false);
-    btnLayout->addWidget(m_deleteBtn);
-    layout->addLayout(btnLayout);
-
     connect(m_refreshBtn, &QPushButton::clicked, this, &ModelListWidget::refresh);
-    connect(m_newBtn, &QPushButton::clicked, this, &ModelListWidget::newModelRequested);
-    connect(m_importBtn, &QPushButton::clicked, this, &ModelListWidget::importGGUFRequested);
-    connect(m_deleteBtn, &QPushButton::clicked, this, &ModelListWidget::onDeleteClicked);
-    connect(m_list, &QListWidget::itemClicked, this, &ModelListWidget::onItemClicked);
-    connect(m_list, &QListWidget::itemDoubleClicked, this, &ModelListWidget::onItemDoubleClicked);
     connect(m_list, &QListWidget::customContextMenuRequested, this, &ModelListWidget::onContextMenu);
     connect(m_list, &QListWidget::itemSelectionChanged, this, [this]() {
-        m_deleteBtn->setEnabled(m_list->currentItem() != nullptr);
-        if (QListWidgetItem *item = m_list->currentItem())
-            emit modelSelected(item->text());
+        const QString id = currentGroupId();
+        if (!id.isEmpty())
+            emit repoSelected(id);
     });
     connect(m_filterEdit, &QLineEdit::textChanged, this, &ModelListWidget::onFilterChanged);
 
-    for (QPushButton *button : {m_refreshBtn, m_newBtn, m_importBtn, m_deleteBtn})
-        button->setStyleSheet(tokens::ghostButtonStyle());
+    // The buttons take their look from the global theme sheet; the card list is
+    // painted by CardDelegate, which must repaint when the palette changes.
+    connect(theme::Theme::instance(), &theme::Theme::changed, this, [this]() {
+        m_list->viewport()->update();
+    });
 
     retranslateUi();
     connect(I18n::instance(), &I18n::languageChanged, this, &ModelListWidget::retranslateUi);
@@ -96,12 +106,12 @@ void ModelListWidget::retranslateUi()
     m_refreshBtn->setText(T("list.refresh"));
     m_refreshBtn->setToolTip(T("list.refreshTip"));
     m_filterEdit->setPlaceholderText(T("list.filter"));
-    m_newBtn->setText(T("list.new"));
-    m_newBtn->setToolTip(T("list.newTip"));
-    m_importBtn->setText(T("list.import"));
-    m_importBtn->setToolTip(T("list.importTip"));
-    m_deleteBtn->setText(T("list.delete"));
-    m_deleteBtn->setToolTip(T("list.deleteTip"));
+
+    // Subtitle/stats are painted by the delegate from the item data, so the
+    // visible language only changes after the cards are re-applied. No CLI call:
+    // the groups are already in memory.
+    if (!m_groups.isEmpty())
+        applyGroups(false);
 }
 
 void ModelListWidget::refresh()
@@ -116,50 +126,153 @@ void ModelListWidget::refresh()
 
 void ModelListWidget::populateList(const QList<OllamaCli::ModelInfo> &models)
 {
-    m_list->clear();
+    m_groups = groupInstalledModels(models, Provenance::instance());
+    applyGroups(true);
+    emit modelsLoaded();
+}
 
-    for (const auto &model : models) {
-        auto *item = new QListWidgetItem(m_list);
-        item->setText(model.name);
-        item->setData(cardrole::Id, model.id);
-        item->setData(cardrole::Title, model.name);
-        item->setData(cardrole::Subtitle, model.modified);
-        item->setData(cardrole::Stats, model.size);
-        item->setToolTip(T("list.itemTip").arg(model.id, model.modified));
+void ModelListWidget::applyGroups(bool notify)
+{
+    const QString previous = currentGroupId();
+
+    {
+        const QSignalBlocker blocker(m_list);
+        m_list->clear();
+        for (const RepoGroup &group : m_groups) {
+            auto *item = new QListWidgetItem(m_list);
+            item->setText(group.title);
+            item->setData(cardrole::Id, group.id);
+            item->setData(cardrole::Title, group.title);
+            item->setData(cardrole::Subtitle, subtitleFor(group));
+            item->setData(cardrole::Stats, statsFor(group));
+            QString tip = group.ref.isEmpty() ? group.title : group.ref;
+            tip += QLatin1Char('\n') + T("list.quantCount").arg(group.quants.size());
+            item->setToolTip(tip);
+        }
     }
 
+    if (!previous.isEmpty())
+        selectRepo(previous);
     if (m_list->count() > 0 && !m_list->currentItem())
         m_list->setCurrentRow(0);
-    emit modelsLoaded();
+    onFilterChanged(m_filterEdit->text());
+
+    // The selection was restored with signals blocked (no reload for a pure
+    // relabel), but a refresh after create/rename/delete means the card content
+    // changed: tell the editor to reload the repository it is showing.
+    const QString current = currentGroupId();
+    if (notify && !current.isEmpty())
+        emit repoSelected(current);
+}
+
+QString ModelListWidget::subtitleFor(const RepoGroup &group) const
+{
+    if (group.local)
+        return T("list.localSource");
+    // A single quant is worth naming: for HuggingFace that is the quantization
+    // (IQ4_XS-MTP) plus the current name after a rename, for Ollama a renamed
+    // model's current name.
+    if (group.quants.size() == 1) {
+        const InstalledQuant &quant = group.quants.first();
+        if (!quant.file.isEmpty()) {
+            QString line = group.owner;
+            if (!quant.quantLabel.isEmpty())
+                line += QStringLiteral(" · ") + quant.quantLabel;
+            if (quant.renamed())
+                line += QStringLiteral(" · ") + quant.modelName;
+            return line;
+        }
+        if (quant.renamed())
+            return group.owner + QStringLiteral(" · ") + quant.modelName;
+    }
+    return group.owner.isEmpty() ? group.ref : group.owner;
+}
+
+QString ModelListWidget::statsFor(const RepoGroup &group) const
+{
+    if (group.quants.isEmpty())
+        return QString();
+    if (group.quants.size() == 1)
+        return group.quants.first().size;
+
+    quint64 total = 0;
+    bool known = false;
+    for (const InstalledQuant &quant : group.quants) {
+        const quint64 bytes = memoryinfo::parseSizeBytes(quant.size);
+        if (bytes > 0) {
+            total += bytes;
+            known = true;
+        }
+    }
+    const QString count = QString::number(group.quants.size());
+    return known ? count + QStringLiteral(" · ") + formatSize(total) : count;
+}
+
+QString ModelListWidget::currentGroupId() const
+{
+    QListWidgetItem *item = m_list->currentItem();
+    return item ? item->data(cardrole::Id).toString() : QString();
 }
 
 QString ModelListWidget::currentModel() const
 {
-    QListWidgetItem *item = m_list->currentItem();
-    return item ? item->text() : QString();
+    const RepoGroup group = this->group(currentGroupId());
+    return group.quants.isEmpty() ? QString() : group.quants.first().modelName;
+}
+
+InstalledSummary ModelListWidget::summary() const
+{
+    InstalledSummary summary;
+    summary.repositories = m_groups.size();
+    for (const RepoGroup &group : m_groups) {
+        summary.quants += group.quants.size();
+        for (const InstalledQuant &quant : group.quants)
+            summary.bytes += memoryinfo::parseSizeBytes(quant.size);
+    }
+    return summary;
 }
 
 QStringList ModelListWidget::modelNames() const
 {
     QStringList names;
-    for (int i = 0; i < m_list->count(); ++i) {
-        QListWidgetItem *item = m_list->item(i);
-        if (!item->isHidden())
-            names << item->text();
+    for (const RepoGroup &group : m_groups) {
+        for (const InstalledQuant &quant : group.quants)
+            names << quant.modelName;
     }
     return names;
 }
 
-void ModelListWidget::onItemClicked(QListWidgetItem *item)
+RepoGroup ModelListWidget::group(const QString &id) const
 {
-    if (item)
-        emit modelSelected(item->text());
+    for (const RepoGroup &group : m_groups) {
+        if (group.id == id)
+            return group;
+    }
+    return RepoGroup();
 }
 
-void ModelListWidget::onItemDoubleClicked(QListWidgetItem *item)
+RepoGroup ModelListWidget::groupOfModel(const QString &modelName) const
 {
-    if (item)
-        emit modelDoubleClicked(item->text());
+    for (const RepoGroup &group : m_groups) {
+        for (const InstalledQuant &quant : group.quants) {
+            if (quant.modelName == modelName)
+                return group;
+        }
+    }
+    return RepoGroup();
+}
+
+void ModelListWidget::selectRepo(const QString &id)
+{
+    for (int i = 0; i < m_list->count(); ++i) {
+        QListWidgetItem *item = m_list->item(i);
+        if (item->data(cardrole::Id).toString() != id)
+            continue;
+        const QSignalBlocker blocker(m_list);
+        m_list->setCurrentItem(item);
+        m_list->scrollToItem(item);
+        return;
+    }
 }
 
 void ModelListWidget::onContextMenu(const QPoint &pos)
@@ -168,37 +281,63 @@ void ModelListWidget::onContextMenu(const QPoint &pos)
     if (!item)
         return;
 
-    const QString modelName = item->text();
+    const QString id = item->data(cardrole::Id).toString();
+    const RepoGroup repo = group(id);
+    if (repo.quants.isEmpty())
+        return;
 
     QMenu menu(this);
     QAction *editAction = menu.addAction(T("ctx.edit"));
-    QAction *renameAction = menu.addAction(T("ctx.rename"));
-    menu.addSeparator();
-    QAction *deleteAction = menu.addAction(T("ctx.delete"));
-    deleteAction->setIcon(QApplication::style()->standardIcon(QStyle::SP_TrashIcon));
+    QAction *bindAction = nullptr;
+    if (repo.local && !repo.quants.isEmpty())
+        bindAction = menu.addAction(T("bind.open"));
+
+    QHash<QAction *, QString> renameActions;
+    QHash<QAction *, QString> deleteActions;
+
+    if (repo.quants.size() == 1) {
+        const QString name = repo.quants.first().modelName;
+        renameActions.insert(menu.addAction(T("ctx.rename")), name);
+        menu.addSeparator();
+        QAction *del = menu.addAction(T("ctx.delete"));
+        del->setIcon(QApplication::style()->standardIcon(QStyle::SP_TrashIcon));
+        deleteActions.insert(del, name);
+    } else {
+        // Several quants in one card: the action needs to say which one.
+        QMenu *renameMenu = menu.addMenu(T("ctx.renameQuant"));
+        QMenu *deleteMenu = menu.addMenu(T("ctx.deleteQuant"));
+        for (const InstalledQuant &quant : repo.quants) {
+            renameActions.insert(renameMenu->addAction(quant.modelName), quant.modelName);
+            deleteActions.insert(deleteMenu->addAction(quant.modelName), quant.modelName);
+        }
+    }
 
     QAction *chosen = menu.exec(m_list->viewport()->mapToGlobal(pos));
+    if (!chosen)
+        return;
     if (chosen == editAction) {
-        emit modelSelected(modelName);
-    } else if (chosen == renameAction) {
-        emit renameRequested(modelName);
-    } else if (chosen == deleteAction) {
-        emit deleteRequested(modelName);
+        const QSignalBlocker blocker(m_list);
+        m_list->setCurrentItem(item);
+        emit repoSelected(id);
+        return;
     }
+    if (bindAction && chosen == bindAction) {
+        emit bindSourceRequested(repo.quants.first().modelName);
+        return;
+    }
+    if (renameActions.contains(chosen))
+        emit renameRequested(renameActions.value(chosen));
+    else if (deleteActions.contains(chosen))
+        emit deleteRequested(deleteActions.value(chosen));
 }
 
 void ModelListWidget::onFilterChanged(const QString &text)
 {
     for (int i = 0; i < m_list->count(); ++i) {
         QListWidgetItem *item = m_list->item(i);
-        item->setHidden(!item->text().contains(text, Qt::CaseInsensitive));
-    }
-}
-
-void ModelListWidget::onDeleteClicked()
-{
-    QString name = currentModel();
-    if (!name.isEmpty()) {
-        emit deleteRequested(name);
+        const RepoGroup repo = group(item->data(cardrole::Id).toString());
+        const bool matches = text.isEmpty()
+                || repo.searchText().contains(text, Qt::CaseInsensitive);
+        item->setHidden(!matches);
     }
 }

@@ -28,6 +28,23 @@ inline quint64 memAvailableBytes()
     return 0;
 }
 
+inline quint64 memTotalBytes()
+{
+    QFile file(QStringLiteral("/proc/meminfo"));
+    if (!file.open(QIODevice::ReadOnly))
+        return 0;
+    const QList<QByteArray> lines = file.readAll().split('\n');
+    for (const QByteArray &line : lines) {
+        if (!line.startsWith("MemTotal:"))
+            continue;
+        const QByteArray digits = line.mid(9).trimmed().split(' ').value(0);
+        bool ok = false;
+        const quint64 kb = digits.toULongLong(&ok);
+        return ok ? kb * 1024ull : 0;
+    }
+    return 0;
+}
+
 inline quint64 vramFreeBytes()
 {
     quint64 freeBytes = 0;
@@ -93,6 +110,30 @@ inline bool fits(quint64 bytes)
     if (available == 0)
         return true;
     return bytes + bytes / 7 <= available;
+}
+
+// Three states instead of a hard yes/no: a model can fit into RAM on its own
+// yet leave too little for the KV cache, which depends on the context the user
+// will pick later. Such a case is a warning, not a refusal.
+enum class Fit {
+    Unknown,  // no data (or no size) — do not paint red
+    Yes,      // fits with the 15% headroom
+    Tight,    // fits on its own, but the headroom does not
+    No        // larger than the available memory
+};
+
+inline Fit fitLevel(quint64 bytes)
+{
+    if (bytes == 0)
+        return Fit::Unknown;
+    const quint64 available = availableBytes();
+    if (available == 0)
+        return Fit::Unknown;
+    if (bytes > available)
+        return Fit::No;
+    if (bytes + bytes / 7 > available)
+        return Fit::Tight;
+    return Fit::Yes;
 }
 
 } // namespace memoryinfo

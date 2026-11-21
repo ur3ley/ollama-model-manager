@@ -1,5 +1,6 @@
 #include "tokendialog.h"
 
+#include "designtokens.h"
 #include "i18n.h"
 #include "tokenmanager.h"
 
@@ -88,7 +89,7 @@ QString TokenDialog::selectedDevice() const
 
 void TokenDialog::setStatus(const QString &text, bool error)
 {
-    m_statusLabel->setStyleSheet(error ? QStringLiteral("color: #c00;") : QString());
+    tokens::setRole(m_statusLabel, error ? "danger" : "");
     m_statusLabel->setText(text);
 }
 

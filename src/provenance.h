@@ -34,6 +34,14 @@ public:
     bool contains(const QString &modelName) const;
     void remove(const QString &modelName);
 
+    /**
+     * Moves the entry from oldName to newName, keeping every field (ref, file,
+     * digest, sha, installedAt) untouched. Call after `ollama cp`/`rm` succeeded:
+     * the original ref must survive a rename so the other quants of the same
+     * repository can still be found.
+     */
+    void rename(const QString &oldName, const QString &newName);
+
     /** Where the file lives (exposed for the self-test). */
     static QString storePath();
 

@@ -8,6 +8,7 @@
 #include <QMessageBox>
 #include <QRegularExpressionValidator>
 #include <QStringList>
+#include "designtokens.h"
 #include "i18n.h"
 
 GGUFImportDialog::GGUFImportDialog(QWidget *parent)
@@ -43,6 +44,7 @@ void GGUFImportDialog::setupUI()
     m_warnLabel = new QLabel();
     m_warnLabel->setWordWrap(true);
     m_warnLabel->setTextFormat(Qt::PlainText);
+    tokens::setRole(m_warnLabel, "warning");
     m_warnLabel->setVisible(false);
     metaLayout->addWidget(m_warnLabel);
     m_metaGroup->setVisible(false);
@@ -72,7 +74,7 @@ void GGUFImportDialog::setupUI()
     m_cancelBtn = new QPushButton(T("common.cancel"));
     btnLayout->addWidget(m_cancelBtn);
     m_createBtn = new QPushButton(T("gguf.create"));
-    m_createBtn->setStyleSheet("QPushButton { font-weight: bold; }");
+    m_createBtn->setProperty("accent", true);
     m_createBtn->setEnabled(false);
     btnLayout->addWidget(m_createBtn);
     layout->addLayout(btnLayout);
@@ -137,11 +139,11 @@ void GGUFImportDialog::showMeta(const GgufMeta &meta)
     m_warnLabel->setVisible(false);
 
     if (!meta.ok) {
-        m_metaLabel->setStyleSheet("color: #b00020;");
+        tokens::setRole(m_metaLabel, "danger");
         m_metaLabel->setText(T("gguf.metaError").arg(meta.error));
         return;
     }
-    m_metaLabel->setStyleSheet("");
+    tokens::setRole(m_metaLabel, "");
 
     const QString paramCount = meta.parameterCount > 0
             ? (meta.parameterCount >= 1000000000ull
@@ -163,7 +165,6 @@ void GGUFImportDialog::showMeta(const GgufMeta &meta)
     m_metaLabel->setText(lines.join('\n'));
 
     if (meta.templateHasSoftSwitch) {
-        m_warnLabel->setStyleSheet("color: #b36b00;");
         m_warnLabel->setText(T("gguf.warnSoftSwitch"));
         m_warnLabel->setVisible(true);
     }

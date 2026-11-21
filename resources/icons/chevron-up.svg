@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">
+  <!-- See chevron-down.svg: same stroke and colour, mirrored. -->
+  <path d="M2 6.4 L5 3.6 L8 6.4" fill="none" stroke="#6b7280"
+        stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

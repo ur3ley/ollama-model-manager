@@ -59,14 +59,22 @@ int main(int argc, char *argv[])
 
     if (argc > 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--pull")) {
         const QString name = QString::fromLocal8Bit(argv[2]);
+        // Optional third argument: the size the registry advertises, in bytes.
+        const qint64 expected = argc > 3 ? QString::fromLocal8Bit(argv[3]).toLongLong() : 0;
         bool finished = false;
         bool ok = false;
         int progressLines = 0;
+        int lastPercent = -2;
+        bool monotonic = true;
         QObject::connect(&cli, &OllamaCli::pullProgress, &app,
-                         [&](const QString &status, int percent) {
+                         [&](const QString &label, int percent, qint64 received, qint64 total) {
             ++progressLines;
+            if (percent >= 0 && lastPercent >= 0 && percent < lastPercent)
+                monotonic = false;
+            lastPercent = percent;
             if (progressLines <= 8 || percent == 100)
-                QTextStream(stdout) << "  [" << percent << "%] " << status << "\n";
+                QTextStream(stdout) << "  [" << percent << "%] " << (received >> 20)
+                                    << " MB / " << (total >> 20) << " MB (" << label << ")\n";
         });
         QObject::connect(&cli, &OllamaCli::pullFinished, &app,
                          [&](bool success, const QString &output) {
@@ -75,13 +83,15 @@ int main(int argc, char *argv[])
             if (!success)
                 QTextStream(stdout) << "output: " << output << "\n";
         });
-        cli.pullModelAsync(name);
+        cli.pullModelAsync(name, expected);
         if (!waitFor([&] { return finished; }, 600000)) {
             QTextStream(stdout) << "FAIL pull timed out\n";
             return 1;
         }
         check(ok, QStringLiteral("pull succeeded"));
         check(progressLines > 0, QStringLiteral("progress lines parsed"));
+        check(monotonic, QStringLiteral("progress never goes backwards"));
+        check(lastPercent == 100, QStringLiteral("progress ends at 100%"));
         QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n" : "FAILURES\n");
         return g_failures == 0 ? 0 : 1;
     }

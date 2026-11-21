@@ -1,5 +1,7 @@
 #include "hfclient.h"
 
+#include "quantmatch.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -7,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSharedPointer>
 #include <QtNetwork/QNetworkRequest>
 #include <QUrlQuery>
 
@@ -67,11 +70,37 @@ HfClient::~HfClient()
 
 QNetworkReply *HfClient::get(const QUrl &url)
 {
+    return m_nam->get(requestFor(url, m_token));
+}
+
+QString HfClient::normalizeToken(const QString &token)
+{
+    // Tokens are copied from the Hub settings page; a trailing newline or a
+    // stray space must never end up inside the Authorization header.
+    return token.trimmed();
+}
+
+void HfClient::setToken(const QString &token)
+{
+    m_token = normalizeToken(token);
+}
+
+bool HfClient::isAuthError(const QString &error)
+{
+    // networkError() below prefixes every 401 with this marker.
+    return error.startsWith(QLatin1String("HTTP 401"));
+}
+
+QNetworkRequest HfClient::requestFor(const QUrl &url, const QString &token)
+{
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("ollama-model-manager"));
-    return m_nam->get(request);
+    const QString value = normalizeToken(token);
+    if (!value.isEmpty())
+        request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + value.toUtf8());
+    return request;
 }
 
 QString HfClient::networkError(QNetworkReply *reply)
@@ -142,29 +171,58 @@ void HfClient::download(const QString &repo, const QString &file, const QString 
         return;
     }
 
+    // `file` is the repository-relative path (some repos keep quant folders
+    // like `Q4_K_M/…`); the local copy uses the bare file name because all
+    // download parts are flattened into `destDir` for the Modelfile wildcard.
     const QString fileName = QFileInfo(file).fileName();
     const QString finalPath = QDir(destDir).filePath(fileName);
     const QString partPath = finalPath + QStringLiteral(".part");
-
+    // Resume support: a `.part` left by a crash/network failure is continued
+    // with an HTTP range request instead of downloading tens of gigabytes
+    // again. The final file appears only after the body was received whole, so
+    // a leftover `.part` is never mistaken for a finished shard.
+    const qint64 alreadyOnDisk = QFileInfo(partPath).exists() ? QFileInfo(partPath).size() : 0;
     auto *out = new QFile(partPath, this);
-    if (!out->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    QIODevice::OpenMode openMode = QIODevice::WriteOnly;
+    openMode |= alreadyOnDisk > 0 ? QIODevice::Append : QIODevice::Truncate;
+    if (!out->open(openMode)) {
         const QString err = out->errorString();
         out->deleteLater();
         emit downloadFinished(false, QString(), err);
         return;
     }
+    const auto offset = QSharedPointer<qint64>::create(alreadyOnDisk);
+    const auto probed = QSharedPointer<bool>::create(false);
 
     const QUrl url(QString::fromLatin1(kHubBase) + QLatin1Char('/') + repo
-                   + QStringLiteral("/resolve/main/") + fileName);
-    QNetworkReply *reply = get(url);
+                   + QStringLiteral("/resolve/main/") + file);
+    QNetworkRequest request = requestFor(url, m_token);
+    if (*offset > 0) {
+        request.setRawHeader("Range",
+                             QByteArrayLiteral("bytes=")
+                                     + QByteArray::number(*offset) + QByteArrayLiteral("-"));
+    }
+    QNetworkReply *reply = m_nam->get(request);
     m_download = reply;
 
-    connect(reply, &QNetworkReply::readyRead, this, [this, reply, out]() {
+    connect(reply, &QNetworkReply::readyRead, this, [reply, out, offset, probed]() {
+        if (!*probed) {
+            *probed = true;
+            // A server that ignores Range answers 200 with the whole body: drop
+            // the partial bytes we were going to append to.
+            if (*offset > 0
+                && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 206) {
+                out->close();
+                if (out->open(QIODevice::WriteOnly | QIODevice::Truncate))
+                    *offset = 0;
+            }
+        }
         out->write(reply->readAll());
     });
     connect(reply, &QNetworkReply::downloadProgress, this,
-            [this](qint64 received, qint64 total) {
-        emit downloadProgress(received, total);
+            [this, offset](qint64 received, qint64 total) {
+        const qint64 done = *offset + received;
+        emit downloadProgress(done, total > 0 ? *offset + total : -1);
     });
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, out, finalPath, partPath]() {
@@ -175,7 +233,7 @@ void HfClient::download(const QString &repo, const QString &file, const QString 
         if (reply->error() != QNetworkReply::NoError) {
             out->close();
             out->deleteLater();
-            QFile::remove(partPath);
+            // Keep the `.part`: the next attempt resumes from its length.
             const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError;
             emit downloadFinished(false, QString(),
                                   cancelled ? QStringLiteral("cancelled")
@@ -271,36 +329,7 @@ HfClient::File HfClient::classifyFile(const QString &name, qint64 size)
 
 QString HfClient::modelNameFor(const QString &repo, const QString &fileName)
 {
-    QString base = repo.section(QLatin1Char('/'), -1);
-    for (const QString &suffix : {QStringLiteral("-GGUF"), QStringLiteral("-gguf")}) {
-        if (base.endsWith(suffix))
-            base.chop(suffix.size());
-    }
-
-    auto sanitize = [](const QString &raw) {
-        QString out;
-        out.reserve(raw.size());
-        for (const QChar ch : raw) {
-            const QChar lower = ch.toLower();
-            if (lower.isLetterOrNumber() || lower == QLatin1Char('.')
-                    || lower == QLatin1Char('_'))
-                out.append(lower);
-            else if (out.isEmpty() || out.endsWith(QLatin1Char('-')))
-                continue;
-            else
-                out.append(QLatin1Char('-'));
-        }
-        while (out.endsWith(QLatin1Char('-')))
-            out.chop(1);
-        return out;
-    };
-
-    const File file = classifyFile(fileName, 0);
-    QString tag = file.quant;
-    if (tag.isEmpty())
-        tag = QFileInfo(fileName).completeBaseName();
-
-    return sanitize(base) + QLatin1Char(':') + sanitize(tag);
+    return canonicalHfModelName(repo, fileName);
 }
 
 void HfClient::fetchRepoInfo(const QString &repo)
