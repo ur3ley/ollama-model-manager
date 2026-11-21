@@ -1,15 +1,59 @@
 #include "modeleditorwidget.h"
+
+#include <QAbstractItemView>
+#include <QMenu>
 #include <QScrollArea>
 #include <QMessageBox>
 #include <QApplication>
 #include <QStyle>
 #include <QGridLayout>
 #include <QRegularExpressionValidator>
+#include "designtokens.h"
+#include "doticons.h"
+#include "memoryinfo.h"
+
+namespace {
+QString stripQuantSuffix(const QString &tagPart)
+{
+    static const QRegularExpression quantRe(
+        QStringLiteral("-(?:ud-)?(?:iq[0-9]+(?:_[a-z0-9]+)*|q[0-9]+(?:_[a-z0-9]+)+"
+                       "|bf16|f16|f32|fp16|fp8)$"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString stem = tagPart;
+    stem.remove(quantRe);
+    return stem;
+}
+} // namespace
 
 ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
-    : QWidget(parent), m_cli(cli)
+    : QWidget(parent)
+    , m_cli(cli)
+    , m_registry(new RegistryClient(this))
 {
     setupUI();
+
+    connect(m_registry, &RegistryClient::tagsFinished, this,
+            [this](bool ok, const QList<RegistryClient::Tag> &tags, const QString &error) {
+        onFamilyTags(ok, tags, error);
+    });
+    connect(m_cli, &OllamaCli::pullFinished, this, [this](bool ok, const QString &output) {
+        if (m_pendingInstall.isEmpty())
+            return;
+        const QString installed = m_pendingInstall;
+        m_pendingInstall.clear();
+        m_fromCombo->setEnabled(true);
+        if (!ok) {
+            m_statusLabel->setText(T("editor.quantFailed").arg(output));
+            return;
+        }
+        m_statusLabel->setText(T("editor.quantInstalled").arg(installed));
+        m_localModels.append(installed);
+        rebuildFromCombo(installed);
+        updateModelButtons();
+    });
+    connect(m_cli, &OllamaCli::deleteFinished, this, [this](bool, const QString &) {
+        rebuildFromCombo(m_fromCombo->currentText());
+    });
 }
 
 void ModelEditorWidget::setupUI()
@@ -43,6 +87,8 @@ void ModelEditorWidget::setupUI()
     m_fromCombo->setEditable(true);
     m_fromCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_fromCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_fromCombo->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_fromCombo->setObjectName(QStringLiteral("fromCombo"));
     m_modelLayout->addRow(new QLabel(), m_fromCombo);
 
     m_nameEdit = new QLineEdit();
@@ -59,6 +105,27 @@ void ModelEditorWidget::setupUI()
     m_parserEdit->setValidator(new QRegularExpressionValidator(
         QRegularExpression("[a-zA-Z0-9._\\-]*"), m_parserEdit));
     m_modelLayout->addRow(new QLabel(), m_parserEdit);
+
+    // Read-only summary: what the model is built from and which renderer it uses.
+    m_modelInfoLabel = new QLabel();
+    m_modelInfoLabel->setWordWrap(true);
+    m_modelInfoLabel->setStyleSheet("color: #666; font-size: 11px;");
+    m_modelInfoLabel->setTextFormat(Qt::PlainText);
+    m_modelLayout->addRow(m_modelInfoLabel);
+
+    m_advancedBtn = new QToolButton();
+    m_advancedBtn->setObjectName(QStringLiteral("advancedBtn"));
+    m_advancedBtn->setCheckable(true);
+    m_advancedBtn->setChecked(false);
+    m_advancedBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_advancedBtn->setArrowType(Qt::RightArrow);
+    m_advancedBtn->setAutoRaise(true);
+    m_modelLayout->addRow(QString(), m_advancedBtn);
+
+    connect(m_advancedBtn, &QToolButton::toggled, this, [this](bool on) {
+        m_advancedBtn->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+        setAdvancedVisible(on);
+    });
 
     form->addWidget(m_modelGroup);
 
@@ -250,6 +317,10 @@ void ModelEditorWidget::setupUI()
     });
 
     connect(m_fromCombo, &QComboBox::currentTextChanged, this, &ModelEditorWidget::onFromChanged);
+    connect(m_fromCombo, QOverload<int>::of(&QComboBox::activated),
+            this, &ModelEditorWidget::onFromActivated);
+    connect(m_fromCombo, &QComboBox::customContextMenuRequested,
+            this, &ModelEditorWidget::onFromContextMenu);
     connect(m_previewBtn, &QPushButton::clicked, this, &ModelEditorWidget::onPreview);
     connect(m_createBtn, &QPushButton::clicked, this, &ModelEditorWidget::onCreate);
     connect(m_updateBtn, &QPushButton::clicked, this, &ModelEditorWidget::onUpdate);
@@ -273,6 +344,9 @@ void ModelEditorWidget::retranslateUi()
         l->setText(T("editor.name"));
     m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
     m_nameEdit->setToolTip(T("editor.nameTip"));
+    m_advancedBtn->setText(T("editor.advanced"));
+    m_advancedBtn->setToolTip(T("editor.advancedTip"));
+    m_modelInfoLabel->setToolTip(T("editor.infoTip"));
 
     if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_rendererEdit)))
         l->setText(T("editor.renderer"));
@@ -325,6 +399,7 @@ void ModelEditorWidget::retranslateUi()
     m_systemPromptCheck->setText(T("editor.sysEnable"));
     m_systemPromptEdit->setPlaceholderText(T("editor.sysPlaceholder"));
 
+    updateModelButtons();
     m_previewBtn->setText(T("editor.preview"));
     m_previewBtn->setToolTip(T("editor.previewTip"));
     m_createBtn->setText(T("editor.create"));
@@ -359,21 +434,151 @@ void ModelEditorWidget::updateTemplateInfo(const OllamaCli::ModelParams &params)
         m_templateWarnLabel->setText(T("editor.templateSoftSwitch"));
 }
 
-void ModelEditorWidget::setAvailableModels(const QStringList &models){
-    QString current = m_fromCombo->currentText();
+void ModelEditorWidget::rebuildFromCombo(const QString &select)
+{
+    const QString current = select.isEmpty() ? m_fromCombo->currentText() : select;
+
     m_fromCombo->blockSignals(true);
     m_fromCombo->clear();
-    m_fromCombo->addItems(models);
-    if (!current.isEmpty()) {
-        int idx = m_fromCombo->findText(current);
-        if (idx >= 0) m_fromCombo->setCurrentIndex(idx);
+    for (const QString &name : m_localModels)
+        m_fromCombo->addItem(name, name);
+
+    if (!m_familyTags.isEmpty()) {
+        m_fromCombo->insertSeparator(m_fromCombo->count());
+        for (const RegistryClient::Tag &tag : m_familyTags) {
+            // Only quants of this very model line, not every tag of the family
+            // (qwen3 alone has 90+ tags from 0.6b to 235b).
+            const QString tagStem = stripQuantSuffix(tag.name.section(QLatin1Char(':'), 1));
+            if (!m_modelStem.isEmpty() && tagStem != m_modelStem)
+                continue;
+            const bool installed = m_localModels.contains(tag.name);
+            const quint64 bytes = memoryinfo::parseSizeBytes(tag.size);
+            const bool fits = memoryinfo::fits(bytes);
+            QString label = tag.name;
+            if (installed)
+                label += QStringLiteral("   \u2713 ") + T("editor.quantInstalledMark");
+            else
+                label += QStringLiteral("   \u2193 ") + tag.size;
+            if (!fits)
+                label += QStringLiteral("   · ") + T("browser.noFit");
+            m_fromCombo->addItem(dotIcon(fits), label, tag.name);
+            if (!installed && !fits)
+                m_fromCombo->setItemData(m_fromCombo->count() - 1,
+                                         QColor(tokens::CardSelected), Qt::ForegroundRole);
+            else if (!installed)
+                m_fromCombo->setItemData(m_fromCombo->count() - 1,
+                                         QColor(tokens::Muted), Qt::ForegroundRole);
+        }
     }
     m_fromCombo->blockSignals(false);
+
+    for (int i = 0; i < m_fromCombo->count(); ++i) {
+        if (m_fromCombo->itemData(i).toString() == current) {
+            m_fromCombo->setCurrentIndex(i);
+            break;
+        }
+    }
+    updateModelButtons();
+}
+
+void ModelEditorWidget::requestFamilyTags()
+{
+    if (m_family.isEmpty())
+        return;
+    m_statusLabel->setText(T("editor.loadingQuants").arg(m_family));
+    m_registry->listTags(m_family);
+}
+
+void ModelEditorWidget::onFamilyTags(bool ok, const QList<RegistryClient::Tag> &tags,
+                                     const QString &error)
+{
+    if (!ok) {
+        m_statusLabel->setText(T("editor.quantsFailed").arg(error));
+        return;
+    }
+    m_familyTags = tags;
+    rebuildFromCombo(m_fromCombo->currentText());
+    m_statusLabel->setText(T("editor.quantsLoaded").arg(tags.size()));
+}
+
+bool ModelEditorWidget::selectedFromInstalled() const
+{
+    const QString name = m_fromCombo->currentData().toString();
+    if (name.isEmpty())
+        return !m_fromCombo->currentText().trimmed().isEmpty()
+                && m_localModels.contains(m_fromCombo->currentText().trimmed());
+    return m_localModels.contains(name);
+}
+
+void ModelEditorWidget::updateModelButtons()
+{
+    const bool installed = selectedFromInstalled();
+    const bool creating = m_currentEditModel.isEmpty();
+
+    QPushButton *primary = creating ? m_createBtn : m_updateBtn;
+    if (installed) {
+        primary->setText(creating ? T("editor.create") : T("editor.update"));
+        primary->setToolTip(creating ? T("editor.createTip") : T("editor.updateTip"));
+    } else {
+        primary->setText(T("editor.installQuant"));
+        primary->setToolTip(T("editor.installQuantTip"));
+    }
+}
+
+void ModelEditorWidget::installSelectedQuant()
+{
+    const QString name = m_fromCombo->currentData().toString();
+    if (name.isEmpty() || m_localModels.contains(name))
+        return;
+    m_pendingInstall = name;
+    m_fromCombo->setEnabled(false);
+    m_statusLabel->setText(T("editor.quantPulling").arg(name));
+    m_cli->pullModelAsync(name);
+}
+
+void ModelEditorWidget::onFromActivated(int index)
+{
+    if (index < 0)
+        return;
+    updateModelButtons();
+    if (!selectedFromInstalled())
+        m_statusLabel->setText(T("editor.quantNotInstalled"));
+}
+
+void ModelEditorWidget::onFromContextMenu(const QPoint &pos)
+{
+    const int index = m_fromCombo->view()->currentIndex().row();
+    if (index < 0)
+        return;
+    const QString name = m_fromCombo->itemData(index).toString();
+    if (name.isEmpty() || !m_localModels.contains(name))
+        return;
+
+    QMenu menu(this);
+    QAction *removeAction = menu.addAction(T("editor.removeQuant"));
+    if (menu.exec(m_fromCombo->mapToGlobal(pos)) != removeAction)
+        return;
+
+    if (QMessageBox::question(this, T("editor.removeQuantTitle"),
+                              T("editor.removeQuantConfirm").arg(name),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            == QMessageBox::Yes) {
+        m_cli->deleteModelAsync(name);
+    }
+}
+
+void ModelEditorWidget::setAvailableModels(const QStringList &models)
+{
+    m_localModels = models;
+    rebuildFromCombo(m_fromCombo->currentText());
 }
 
 void ModelEditorWidget::setCreateMode()
 {
     m_currentEditModel.clear();
+    m_family.clear();
+    m_familyTags.clear();
+    rebuildFromCombo();
     m_fromBlob.clear();
     m_createBtn->setVisible(true);
     m_updateBtn->setVisible(false);
@@ -410,6 +615,8 @@ void ModelEditorWidget::setCreateMode()
     m_templateSoftSwitch = false;
     m_templateWarnLabel->setVisible(false);
 
+    m_modelInfoLabel->clear();
+    updateModelRowVisibility();
     m_defaultCtxLabel->clear();
     m_maxCtxLabel->clear();
     m_baseMaxContext = 32768;
@@ -420,6 +627,7 @@ void ModelEditorWidget::setCreateMode()
 void ModelEditorWidget::setEditMode(const QString &modelName)
 {
     m_currentEditModel = modelName;
+    updateModelRowVisibility();
     m_createBtn->setVisible(false);
     m_updateBtn->setVisible(true);
     m_nameEdit->setText(modelName);
@@ -505,12 +713,31 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     if (hasSystem)
         m_systemPromptEdit->setPlainText(params.systemPrompt);
 
+    m_family = modelName.section(QLatin1Char(':'), 0, 0);
+    m_modelStem = stripQuantSuffix(modelName.section(QLatin1Char(':'), 1));
     setEditMode(modelName);
+    requestFamilyTags();
 
     m_rendererEdit->setText(params.renderer);
     m_parserEdit->setText(params.parser);
     updateCapabilities(params);
     updateTemplateInfo(params);
+
+    QStringList info;
+    const QString base = params.fromBase;
+    if (!base.isEmpty() && base != modelName)
+        info << T("editor.modelInfoBase").arg(base);
+    if (!params.renderer.isEmpty() || !params.parser.isEmpty()) {
+        info << T("editor.modelInfoDirectives")
+                .arg(params.renderer.isEmpty() ? QStringLiteral("—") : params.renderer,
+                     params.parser.isEmpty() ? QStringLiteral("—") : params.parser);
+    }
+    const quint64 available = memoryinfo::availableBytes();
+    if (available > 0) {
+        info << T("editor.memoryAvailable")
+                .arg(QString::number(double(available) / (1024.0 * 1024.0 * 1024.0), 'f', 0));
+    }
+    m_modelInfoLabel->setText(info.join(QStringLiteral("  ·  ")));
 
     updateContextInfo(m_fromCombo->currentText(), params.contextLength);
 
@@ -572,6 +799,10 @@ void ModelEditorWidget::onPreview()
 
 void ModelEditorWidget::onCreate()
 {
+    if (!selectedFromInstalled() && !m_familyTags.isEmpty()) {
+        installSelectedQuant();
+        return;
+    }
     auto config = collectConfig();
     if (config.from.isEmpty()) {
         QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
@@ -588,7 +819,12 @@ void ModelEditorWidget::onCreate()
 
 void ModelEditorWidget::onUpdate()
 {
-    if (m_currentEditModel.isEmpty()) return;
+    if (m_currentEditModel.isEmpty())
+        return;
+    if (!selectedFromInstalled()) {
+        installSelectedQuant();
+        return;
+    }
 
     auto config = collectConfig();
     if (config.from.isEmpty()) {
@@ -597,6 +833,13 @@ void ModelEditorWidget::onUpdate()
     }
     QString name = m_nameEdit->text().trimmed();
     if (name.isEmpty()) return;
+
+    // Editing the name of an installed model means renaming, not creating a
+    // second copy with a different name.
+    if (!m_currentEditModel.isEmpty() && name != m_currentEditModel) {
+        emit renameRequested(m_currentEditModel, name);
+        return;
+    }
 
     QString content = ModelfileBuilder::build(config);
     emit updateRequested(name, content);
@@ -699,6 +942,25 @@ void ModelEditorWidget::setMaxCtxLabel(int maxCtx)
     } else {
         m_maxCtxLabel->clear();
     }
+}
+
+void ModelEditorWidget::setAdvancedVisible(bool visible)
+{
+    // Rows: 0 = FROM, 1 = name, 2 = renderer, 3 = parser.
+    // Creating a model always needs FROM; editing an installed one only shows
+    // the name until "Advanced" is expanded.
+    const bool creating = m_currentEditModel.isEmpty();
+    m_modelLayout->setRowVisible(0, visible || creating);
+    m_modelLayout->setRowVisible(2, visible);
+    m_modelLayout->setRowVisible(3, visible);
+}
+
+void ModelEditorWidget::updateModelRowVisibility()
+{
+    // Collapsed by default for both modes: an installed model shows only its
+    // name, a new model additionally shows FROM.
+    m_advancedBtn->setChecked(false);
+    setAdvancedVisible(false);
 }
 
 void ModelEditorWidget::toggleParamEnabled(QCheckBox *check, QWidget *widget)

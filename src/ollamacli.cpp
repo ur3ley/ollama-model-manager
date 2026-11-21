@@ -443,3 +443,37 @@ void OllamaCli::cancelPull()
     if (m_pull)
         m_pull->kill();
 }
+
+void OllamaCli::renameModelAsync(const QString &oldName, const QString &newName)
+{
+    auto *copy = new QProcess(this);
+    connect(copy, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, copy, oldName](int exitCode, QProcess::ExitStatus status) {
+        const QString copyOutput = QString::fromUtf8(copy->readAllStandardOutput())
+                + QString::fromUtf8(copy->readAllStandardError());
+        copy->deleteLater();
+        if (exitCode != 0 || status != QProcess::NormalExit) {
+            emit renameFinished(false, copyOutput.trimmed());
+            return;
+        }
+
+        auto *remove = new QProcess(this);
+        connect(remove, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                [this, remove](int rmExit, QProcess::ExitStatus rmStatus) {
+            const QString rmOutput = QString::fromUtf8(remove->readAllStandardOutput())
+                    + QString::fromUtf8(remove->readAllStandardError());
+            remove->deleteLater();
+            emit renameFinished(rmExit == 0 && rmStatus == QProcess::NormalExit,
+                                rmOutput.trimmed());
+        });
+        remove->start(m_ollamaPath, {QStringLiteral("rm"), oldName});
+    });
+    connect(copy, &QProcess::errorOccurred, this, [this, copy](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        const QString message = copy->errorString();
+        copy->deleteLater();
+        emit renameFinished(false, message);
+    });
+    copy->start(m_ollamaPath, {QStringLiteral("cp"), oldName, newName});
+}

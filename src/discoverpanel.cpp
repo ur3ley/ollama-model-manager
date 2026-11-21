@@ -2,6 +2,7 @@
 
 #include "designtokens.h"
 #include "i18n.h"
+#include "memoryinfo.h"
 #include "modelbrowserpanel.h"
 #include "ollamacli.h"
 #include "provenance.h"
@@ -118,6 +119,8 @@ DiscoverPanel::DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent)
             const int colon = tag.name.indexOf(QLatin1Char(':'));
             variant.label = colon > 0 ? tag.name.mid(colon + 1) : tag.name;
             variant.size = tag.size;
+            variant.sizeBytes = memoryinfo::parseSizeBytes(tag.size);
+            variant.fitsMemory = memoryinfo::fits(variant.sizeBytes);
             if (!tag.context.isEmpty())
                 variant.hint = T("browser.context").arg(tag.context);
             if (m_installedNames.contains(tag.name))
@@ -154,6 +157,8 @@ DiscoverPanel::DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent)
             variant.id = file.name;
             variant.label = file.quant.isEmpty() ? file.name : file.quant;
             variant.size = humanSize(file.size);
+            variant.sizeBytes = quint64(file.size);
+            variant.fitsMemory = memoryinfo::fits(variant.sizeBytes);
             if (isProjector(file.name)) {
                 variant.enabled = false;
                 variant.hint = T("browser.projector");

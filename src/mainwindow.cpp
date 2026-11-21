@@ -59,6 +59,16 @@ MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *par
         onRefreshAll();
     });
 
+    connect(m_cli, &OllamaCli::renameFinished, this,
+            [this](bool success, const QString &output) {
+        if (success) {
+            statusBar()->showMessage(T("status.renamed"), 3000);
+        } else {
+            QMessageBox::warning(this, T("error.title"), T("error.renameFailed").arg(output));
+        }
+        onRefreshAll();
+    });
+
     connect(m_cli, &OllamaCli::copyFinished, this, [this](bool success, const QString &output) {
         if (success) {
             statusBar()->showMessage(T("status.renamed"), 3000);
@@ -142,6 +152,8 @@ void MainWindow::setupUI()
             this, &MainWindow::onCreateModel);
     connect(m_editorWidget, &ModelEditorWidget::updateRequested,
             this, &MainWindow::onUpdateModel);
+    connect(m_editorWidget, &ModelEditorWidget::renameRequested,
+            this, &MainWindow::onRenameModelDirect);
 }
 
 void MainWindow::setupMenuBar()
@@ -318,6 +330,12 @@ void MainWindow::onDeleteModel(const QString &modelName)
     if (ret == QMessageBox::Yes) {
         m_cli->deleteModelAsync(modelName);
     }
+}
+
+void MainWindow::onRenameModelDirect(const QString &oldName, const QString &newName)
+{
+    statusBar()->showMessage(T("status.renaming").arg(newName));
+    m_cli->renameModelAsync(oldName, newName);
 }
 
 void MainWindow::onRenameModel(const QString &modelName)

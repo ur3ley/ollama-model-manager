@@ -49,6 +49,7 @@ private slots:
     void onDownloadModel();
     void onCreateModel(const QString &name, const QString &modelfileContent);
     void onUpdateModel(const QString &name, const QString &modelfileContent);
+    void onRenameModelDirect(const QString &oldName, const QString &newName);
     void onRefreshAll();
     void onManageTokens();
 

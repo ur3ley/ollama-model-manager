@@ -19,6 +19,8 @@ struct BrowserVariant {
     QString size;    // 24 GB
     QString hint;    // disabled reason, empty when selectable
     bool enabled = true;
+    quint64 sizeBytes = 0;
+    bool fitsMemory = true;
 };
 
 struct BrowserItem {

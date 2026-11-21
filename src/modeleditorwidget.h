@@ -12,11 +12,13 @@
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QSlider>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include "ollamacli.h"
 #include "modelfilebuilder.h"
 #include "i18n.h"
+#include "registryclient.h"
 
 class ModelEditorWidget : public QWidget
 {
@@ -35,6 +37,7 @@ public:
 signals:
     void createRequested(const QString &name, const QString &modelfileContent);
     void updateRequested(const QString &name, const QString &modelfileContent);
+    void renameRequested(const QString &oldName, const QString &newName);
 
 private slots:
     void onFromChanged(const QString &baseModel);
@@ -54,6 +57,16 @@ private:
     void setDefaultCtxLabel(int defaultCtx);
     void setMaxCtxLabel(int maxCtx);
     void toggleParamEnabled(QCheckBox *check, QWidget *widget);
+    void setAdvancedVisible(bool visible);
+    void rebuildFromCombo(const QString &select = QString());
+    void requestFamilyTags();
+    void onFamilyTags(bool ok, const QList<RegistryClient::Tag> &tags, const QString &error);
+    void onFromActivated(int index);
+    void onFromContextMenu(const QPoint &pos);
+    bool selectedFromInstalled() const;
+    void updateModelButtons();
+    void installSelectedQuant();
+    void updateModelRowVisibility();
 
     OllamaCli *m_cli;
 
@@ -68,10 +81,18 @@ private:
     QGroupBox *m_penaltyGroup;
     QGroupBox *m_sysGroup;
 
+    RegistryClient *m_registry;
+    QList<RegistryClient::Tag> m_familyTags;
+    QString m_family;
+    QString m_modelStem;
+    QStringList m_localModels;
+    QString m_pendingInstall;
     QComboBox *m_fromCombo;
     QLineEdit *m_nameEdit;
     QLineEdit *m_rendererEdit;
     QLineEdit *m_parserEdit;
+    QLabel *m_modelInfoLabel;
+    QToolButton *m_advancedBtn;
     QLabel *m_defaultCtxLabel;
     QLabel *m_maxCtxLabel;
 

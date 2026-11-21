@@ -13,7 +13,11 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QListWidget>
+#include <QComboBox>
+#include <QPushButton>
+#include <QToolButton>
 #include <QTabWidget>
+#include <QTextStream>
 #include <QTextStream>
 #include <QThread>
 
@@ -54,6 +58,44 @@ int main(int argc, char *argv[])
         while (timer.elapsed() < 1200) {
             QCoreApplication::processEvents();
             QThread::msleep(20);
+        }
+    }
+
+    const bool expandAdvanced = argc > 5
+            && QString::fromLocal8Bit(argv[5]) == QLatin1String("adv");
+    if (expandAdvanced) {
+        if (auto *btn = window.findChild<QToolButton *>(QStringLiteral("advancedBtn")))
+            btn->setChecked(true);
+        timer.restart();
+        while (timer.elapsed() < 1200) {
+            QCoreApplication::processEvents();
+            QThread::msleep(20);
+        }
+        // Print the FROM list so the quant entries are verifiable headlessly.
+        if (auto *combo = window.findChild<QComboBox *>(QStringLiteral("fromCombo"))) {
+            const int pick = argc > 6 ? QString::fromLocal8Bit(argv[6]).toInt() : -1;
+            if (pick >= 0 && pick < combo->count()) {
+                combo->setCurrentIndex(pick);
+                combo->activated(pick);
+                QCoreApplication::processEvents();
+            }
+            QTextStream out(stdout);
+            out << "FROM items:\n";
+            for (auto *button : window.findChildren<QPushButton *>()) {
+                const QString text = button->text();
+                if (text.contains(QLatin1String("модель")) || text.contains(QLatin1String("Установить"))
+                        || text.contains(QLatin1String("Install")) || text.contains(QLatin1String("Update"))) {
+                    out << "button: " << text << "\n";
+                }
+            }
+            for (int i = 0; i < combo->count(); ++i) {
+                if (combo->itemText(i).trimmed().isEmpty()) {
+                    out << "  --- separator ---\n";
+                    continue;
+                }
+                out << "  " << combo->itemText(i)
+                    << "  [" << combo->itemData(i).toString() << "]\n";
+            }
         }
     }
 

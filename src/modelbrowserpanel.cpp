@@ -1,6 +1,8 @@
 #include "modelbrowserpanel.h"
 
 #include "carddelegate.h"
+#include "doticons.h"
+#include "memoryinfo.h"
 #include "designtokens.h"
 #include "i18n.h"
 
@@ -393,10 +395,13 @@ void ModelBrowserPanel::updateDetail()
         QString label = variant.label;
         if (!variant.size.isEmpty())
             label += QStringLiteral("  ·  ") + variant.size;
-        if (!variant.enabled)
-            label += QStringLiteral("  ·  ") + (variant.hint.isEmpty() ? T("browser.disabled")
-                                                                       : variant.hint);
-        m_variantCombo->addItem(label);
+        if (!variant.enabled) {
+            label += QStringLiteral("  ·  ")
+                    + (variant.hint.isEmpty() ? T("browser.disabled") : variant.hint);
+        } else if (!variant.fitsMemory) {
+            label += QStringLiteral("  ·  ") + T("browser.noFit");
+        }
+        m_variantCombo->addItem(dotIcon(variant.enabled && variant.fitsMemory), label);
         const int row = m_variantCombo->count() - 1;
         m_variantCombo->setItemData(row, variant.id, Qt::UserRole + 1);
         if (!variant.enabled) {

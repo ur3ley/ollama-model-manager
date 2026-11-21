@@ -55,6 +55,8 @@ public:
     void createModelAsync(const QString &name, const QString &modelfilePath);
     void deleteModelAsync(const QString &name);
     void copyModelAsync(const QString &oldName, const QString &newName);
+    /** Rename in place: copy to the new name, then remove the old one. */
+    void renameModelAsync(const QString &oldName, const QString &newName);
 
     /** Pull a model from the Ollama registry; progress comes as CLI output. */
     void pullModelAsync(const QString &name);
@@ -65,6 +67,7 @@ signals:
     void createFinished(bool success, const QString &output);
     void deleteFinished(bool success, const QString &output);
     void copyFinished(bool success, const QString &output);
+    void renameFinished(bool success, const QString &output);
 
     void modelsListed(bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error);
     void pullProgress(const QString &status, int percent);
