@@ -42,11 +42,19 @@ int main(int argc, char *argv[])
     <p class="mt-1 line-clamp-2 text-[15px] leading-6">Qwen3 is the latest generation.</p>
     <span>0.6b</span><span>235b</span>
   </a></li>
+  <li><a href="/h4rithd/nullguard" class="group grid grid-cols-1 gap-x-4 px-4 py-6 sm:grid-cols-[minmax(0,1fr)_auto] md:px-7">
+    <h2 title="nullguard"><span >h4rithd/nullguard</span></h2>
+    <span title="Updated May 12, 2026">6mo</span>
+    <div><span class="inline-flex bg-indigo-50">tools</span><span class="inline-flex bg-indigo-50">thinking</span></div>
+    <p class="mt-1 line-clamp-2 text-[15px] leading-6 text-black sm:col-span-2">NullGuard is an abliterated research build.</p>
+    <span title="614 downloads"><span>614</span></span>
+  </a></li>
 </ul>
+<p><a href="/public/icon-32x32.png">icon</a><a href="/download">download</a></p>
 )HTML");
 
     const auto models = RegistryClient::parseSearch(searchHtml);
-    check(models.size() == 2, QStringLiteral("search: two models"));
+    check(models.size() == 3, QStringLiteral("search: three models, nav links ignored"));
     check(models.value(0).name == QLatin1String("qwen3.8"), QStringLiteral("search: name with a dot"));
     check(models.value(0).sizes == QStringList({QStringLiteral("27b"), QStringLiteral("35b")}),
           QStringLiteral("search: sizes"));
@@ -58,9 +66,23 @@ int main(int argc, char *argv[])
     check(!models.value(1).capabilities.contains(QLatin1String("vision")),
           QStringLiteral("search: no vision for qwen3"));
 
+    // Namespaced card: the ref keeps its owner, the chips come from the same
+    // markup as the official ones and the download count is the title pair.
+    check(models.value(2).name == QLatin1String("h4rithd/nullguard"),
+          QStringLiteral("search: namespaced model keeps its owner"));
+    check(models.value(2).description.contains(QLatin1String("NullGuard")),
+          QStringLiteral("search: namespaced description"));
+    check(models.value(2).capabilities == QStringList({QStringLiteral("tools"),
+                                                       QStringLiteral("thinking")}),
+          QStringLiteral("search: namespaced capabilities"));
+    check(models.value(2).pulls == QLatin1String("614"),
+          QStringLiteral("search: namespaced download count"));
+
     // Duplicate links must not duplicate rows.
-    const auto deduped = RegistryClient::parseSearch(
-        QStringLiteral(R"HTML(<a href="/library/gemma4">x</a><a href="/library/gemma4">y</a>)HTML"));
+    const auto deduped = RegistryClient::parseSearch(QStringLiteral(R"HTML(
+<a href="/library/gemma4" class="group w-full">x</a>
+<a href="/library/gemma4" class="group w-full">y</a>
+)HTML"));
     check(deduped.size() == 1, QStringLiteral("search: duplicate links collapsed"));
 
     // Tag cards have two anchors per row and mixed size/context/input text.
@@ -84,16 +106,25 @@ int main(int argc, char *argv[])
     <span>qwen3-vl:8b</span><span>6.1GB</span><span>256K</span><span>Vision</span>
   </a>
 </div>
+<div>
+  <a href="/h4rithd/nullguard:latest" class="hidden md:grid">
+    <span>h4rithd/nullguard:latest</span><span>9.3GB</span><span>8K</span><span>Text</span>
+  </a>
+</div>
 )HTML");
 
     const auto tags = RegistryClient::parseTags(tagsHtml);
-    check(tags.size() == 3, QStringLiteral("tags: duplicates collapsed"));
+    check(tags.size() == 4, QStringLiteral("tags: duplicates collapsed"));
     check(tags.value(0).name == QLatin1String("qwen3:latest"), QStringLiteral("tags: name"));
     check(tags.value(0).size == QLatin1String("5.2GB"), QStringLiteral("tags: size"));
     check(tags.value(0).context == QLatin1String("40K"), QStringLiteral("tags: context"));
     check(tags.value(0).input == QLatin1String("Text"), QStringLiteral("tags: input"));
     check(tags.value(1).context == QLatin1String("256K"), QStringLiteral("tags: context 256K"));
     check(tags.value(2).input == QLatin1String("Vision"), QStringLiteral("tags: vision input"));
+    check(tags.value(3).name == QLatin1String("h4rithd/nullguard:latest"),
+          QStringLiteral("tags: namespaced name keeps its owner"));
+    check(tags.value(3).size == QLatin1String("9.3GB"), QStringLiteral("tags: namespaced size"));
+    check(tags.value(3).context == QLatin1String("8K"), QStringLiteral("tags: namespaced context"));
 
     // ------------------------------------------------ family page → details
     // Trimmed copy of ollama.com/library/qwen3: the og: meta, the header

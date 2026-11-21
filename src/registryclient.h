@@ -22,7 +22,7 @@ class RegistryClient : public QObject
     Q_OBJECT
 public:
     struct Model {
-        QString name;
+        QString name;              // `qwen3` (official) or `owner/name`, as `ollama list` prints it
         QString description;
         QStringList capabilities;  // tools, thinking, vision, embedding
         QStringList sizes;         // 0.6b, 8b, 235b ...
@@ -37,8 +37,8 @@ public:
     };
 
     // What the library page of a family says about the model itself
-    // (`/library/<family>`): the long blurb, the readme source and the
-    // "Updated … ago" line from the header.
+    // (`/library/<family>` or `/<owner>/<name>`): the long blurb, the readme
+    // source and the "Updated … ago" line from the header.
     struct ModelDetails {
         QString description;     // <meta property="og:description">
         QString readmeMarkdown;  // raw markdown, empty when the page has none
@@ -47,9 +47,10 @@ public:
         QStringList sizes;
     };
 
-    // What a single tag page (`/library/<family>:<tag>`) says about the
-    // weights: architecture, parameter count and quantization live in the
-    // `model` blob row, the license text in the `license` blob row.
+    // What a single tag page (`/library/<family>:<tag>` or
+    // `/<owner>/<name>:<tag>`) says about the weights: architecture, parameter
+    // count and quantization live in the `model` blob row, the license text in
+    // the `license` blob row.
     struct TagDetails {
         QString architecture;  // qwen3moe
         QString parameters;    // 30.5B

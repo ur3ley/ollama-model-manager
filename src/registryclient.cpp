@@ -11,6 +11,16 @@ namespace {
 
 const char *kLibraryBase = "https://ollama.com";
 
+// Refs are stored the way `ollama list` prints them: official models without
+// the `library/` prefix (`qwen3:latest`), namespaced ones as `owner/name:tag`
+// (`h4rithd/nullguard:latest`). ollama.com and registry.ollama.ai both address
+// official models under `library/`, so only a ref without an owner needs the
+// segment added; a ref that already carries it is left alone.
+QString qualifiedRef(const QString &ref)
+{
+    return ref.contains(QLatin1Char('/')) ? ref : QStringLiteral("library/") + ref;
+}
+
 // Decodes the HTML entities the library pages actually use, without touching
 // whitespace: the readme textarea stores markdown, where newlines matter.
 QString decodeEntities(const QString &input)
@@ -165,8 +175,8 @@ void RegistryClient::listTags(const QString &family)
 {
     disposeReply(m_tags, this);
 
-    const QString url = QString::fromLatin1(kLibraryBase) + QStringLiteral("/library/")
-            + family + QStringLiteral("/tags");
+    const QString url = QString::fromLatin1(kLibraryBase) + QLatin1Char('/')
+            + qualifiedRef(family) + QStringLiteral("/tags");
     QNetworkReply *reply = get(url);
     m_tags = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -193,7 +203,8 @@ void RegistryClient::fetchModelDetails(const QString &family)
 
     disposeReply(m_modelDetails, this);
 
-    const QString url = QString::fromLatin1(kLibraryBase) + QStringLiteral("/library/") + family;
+    const QString url = QString::fromLatin1(kLibraryBase) + QLatin1Char('/')
+            + qualifiedRef(family);
     QNetworkReply *reply = get(url);
     m_modelDetails = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, family]() {
@@ -222,7 +233,8 @@ void RegistryClient::fetchTagDetails(const QString &ref)
 
     disposeReply(m_tagDetails, this);
 
-    const QString url = QString::fromLatin1(kLibraryBase) + QStringLiteral("/library/") + ref;
+    const QString url = QString::fromLatin1(kLibraryBase) + QLatin1Char('/')
+            + qualifiedRef(ref);
     QNetworkReply *reply = get(url);
     m_tagDetails = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, ref]() {
@@ -244,8 +256,13 @@ QList<RegistryClient::Model> RegistryClient::parseSearch(const QString &html)
     QList<Model> models;
     QSet<QString> seen;
 
+    // Model cards link either `/library/<name>` (official) or `/<owner>/<name>`
+    // (namespaced); the `class="group …"` anchor marker keeps navigation and
+    // asset links (`/download`, `/public/…`) out. The `library/` prefix is
+    // dropped so the name matches what `ollama list` prints.
     static const QRegularExpression linkRe(
-        QStringLiteral("href=\"/library/([A-Za-z0-9._-]+)\""));
+        QStringLiteral("href=\"/(?:library/)?([A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?)\""
+                       "[^>]{0,200}?class=\"group"));
     QList<QRegularExpressionMatch> matches;
     QRegularExpressionMatchIterator it = linkRe.globalMatch(html);
     while (it.hasNext())
@@ -307,8 +324,12 @@ QList<RegistryClient::Tag> RegistryClient::parseTags(const QString &html)
     QList<Tag> tags;
     QHash<QString, int> indexOf;
 
+    // Tag rows link `/library/<family>:<tag>` or `/<owner>/<name>:<tag>`; the
+    // optional owner is kept, the `library/` prefix is dropped, and `/blobs/…`
+    // links are excluded by refusing `/` inside the tag part.
     static const QRegularExpression linkRe(
-        QStringLiteral("href=\"/library/([A-Za-z0-9._-]+:[^\"#]+)\""));
+        QStringLiteral("href=\"/(?:library/)?"
+                       "([A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?:[^\"#/]+)\""));
     QList<QRegularExpressionMatch> matches;
     QRegularExpressionMatchIterator it = linkRe.globalMatch(html);
     while (it.hasNext())
@@ -474,8 +495,8 @@ void RegistryClient::checkManifest(const QString &ref)
         tag = ref.mid(colon + 1);
     }
 
-    const QString url = QStringLiteral("https://registry.ollama.ai/v2/library/")
-            + family + QStringLiteral("/manifests/") + tag;
+    const QString url = QStringLiteral("https://registry.ollama.ai/v2/")
+            + qualifiedRef(family) + QStringLiteral("/manifests/") + tag;
     QNetworkReply *reply = get(url);
     m_manifest = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, ref]() {
