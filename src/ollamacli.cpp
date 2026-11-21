@@ -1,4 +1,6 @@
 #include "ollamacli.h"
+
+#include <QRegularExpression>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QFileInfo>
@@ -52,6 +54,9 @@ OllamaCli::ModelParams OllamaCli::showModel(const QString &name)
     QString modelfileContent = showModelfile(name);
     if (!modelfileContent.isEmpty()) {
         params.fromBase = extractFromBase(modelfileContent);
+        params.templateStr = extractDirective(modelfileContent, QStringLiteral("TEMPLATE"));
+        params.renderer = extractDirective(modelfileContent, QStringLiteral("RENDERER"));
+        params.parser = extractDirective(modelfileContent, QStringLiteral("PARSER"));
     }
 
     return params;
@@ -209,8 +214,7 @@ OllamaCli::ModelParams OllamaCli::parseShowOutput(const QString &output)
 }
 
 QString OllamaCli::extractFromBase(const QString &modelfileContent)
-{
-    static const QRegularExpression commentFromRe(
+{    static const QRegularExpression commentFromRe(
         "^#\\s*FROM\\s+(.+)$", QRegularExpression::MultilineOption);
     QRegularExpressionMatch cmtMatch = commentFromRe.match(modelfileContent);
     if (cmtMatch.hasMatch()) {
@@ -277,4 +281,121 @@ QString OllamaCli::findOtherModelSharingBlob(const QString &blob, const QString 
         }
     }
     return bestMatch;
+}
+
+// Extracts the value of a Modelfile directive (TEMPLATE, RENDERER, PARSER)
+// from `ollama show --modelfile` output. Triple-quoted values may span lines
+// and the closing quotes may sit on their own line or right after the last
+// character; single-quoted values are unquoted.
+QString OllamaCli::extractDirective(const QString &modelfileContent, const QString &directive)
+{
+    static const QString tripleQuote = QStringLiteral("\"\"\"");
+
+    const QRegularExpression re(
+        QStringLiteral("^%1[ \\t]+(.*)$").arg(QRegularExpression::escape(directive)),
+        QRegularExpression::MultilineOption);
+    const QRegularExpressionMatch match = re.match(modelfileContent);
+    if (!match.hasMatch())
+        return QString();
+
+    QString value = match.captured(1).trimmed();
+
+    if (value.startsWith(tripleQuote)) {
+        const int openPos = modelfileContent.indexOf(tripleQuote, match.capturedStart(1));
+        const int closePos = openPos < 0 ? -1
+                                         : modelfileContent.indexOf(tripleQuote, openPos + 3);
+        if (closePos > openPos)
+            return modelfileContent.mid(openPos + 3, closePos - openPos - 3).trimmed();
+    }
+
+    if (value.startsWith(QLatin1Char('"')) && value.endsWith(QLatin1Char('"')) && value.size() >= 2) {
+        value = value.mid(1, value.size() - 2);
+        value.replace(QLatin1String("\\\""), QLatin1String("\""));
+    }
+    return value;
+}
+
+bool OllamaCli::isPulling() const
+{
+    return m_pull != nullptr;
+}
+
+void OllamaCli::pullModelAsync(const QString &name)
+{
+    if (m_pull) {
+        m_pull->kill();
+        m_pull->deleteLater();
+        m_pull = nullptr;
+    }
+
+    m_pullBuffer.clear();
+    m_lastPullStatus.clear();
+    m_lastPullPercent = -2;
+    auto *process = new QProcess(this);
+    m_pull = process;
+    process->setProcessChannelMode(QProcess::MergedChannels);
+
+    auto handleChunk = [this]() {
+        if (!m_pull)
+            return;
+        m_pullBuffer += QString::fromUtf8(m_pull->readAll());
+        int newline;
+        while ((newline = m_pullBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
+            QString line = m_pullBuffer.left(newline);
+            m_pullBuffer.remove(0, newline + 1);
+            // Strip ANSI escapes and carriage-return redraws.
+            line.remove(QRegularExpression(QStringLiteral("\x1b\\[[0-9;?]*[A-Za-z]")));
+            line = line.trimmed();
+            if (line.isEmpty())
+                continue;
+
+            static const QRegularExpression percentRe(QStringLiteral("(\\d+)%"));
+            const QRegularExpressionMatch percentMatch = percentRe.match(line);
+            const int percent = percentMatch.hasMatch() ? percentMatch.captured(1).toInt() : -1;
+
+            QString status = line;
+            static const QRegularExpression sizeRe(
+                QStringLiteral("(\\d+(?:\\.\\d+)?\\s*[KMG]B)\\s*/\\s*(\\d+(?:\\.\\d+)?\\s*[KMG]B)"));
+            const QRegularExpressionMatch sizeMatch = sizeRe.match(line);
+            if (sizeMatch.hasMatch())
+                status = sizeMatch.captured(1) + QStringLiteral(" / ") + sizeMatch.captured(2);
+            else if (line.startsWith(QLatin1String("pulling ")))
+                status = line.section(QLatin1Char(':'), 0, 0);
+
+            // Ollama redraws the same line many times; emit only changes.
+            if (status == m_lastPullStatus && percent == m_lastPullPercent)
+                continue;
+            m_lastPullStatus = status;
+            m_lastPullPercent = percent;
+            emit pullProgress(status, percent);
+        }
+    };
+
+    connect(process, &QProcess::readyRead, this, handleChunk);
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, process, handleChunk](int exitCode, QProcess::ExitStatus status) {
+        handleChunk();
+        const QString output = QString::fromUtf8(process->readAll()).trimmed();
+        if (m_pull == process)
+            m_pull = nullptr;
+        process->deleteLater();
+        emit pullFinished(exitCode == 0 && status == QProcess::NormalExit, output);
+    });
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            if (m_pull == process)
+                m_pull = nullptr;
+            const QString err = process->errorString();
+            process->deleteLater();
+            emit pullFinished(false, err);
+        }
+    });
+
+    process->start(m_ollamaPath, {QStringLiteral("pull"), name});
+}
+
+void OllamaCli::cancelPull()
+{
+    if (m_pull)
+        m_pull->kill();
 }

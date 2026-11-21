@@ -43,6 +43,7 @@ private slots:
     void onDeleteModel(const QString &modelName);
     void onRenameModel(const QString &modelName);
     void onImportGGUF();
+    void onDownloadModel();
     void onCreateModel(const QString &name, const QString &modelfileContent);
     void onUpdateModel(const QString &name, const QString &modelfileContent);
     void onRefreshAll();
@@ -73,6 +74,7 @@ private:
     QMenu *m_helpMenu;
     QAction *m_newAction;
     QAction *m_importAction;
+    QAction *m_downloadAction;
     QAction *m_refreshAction;
     QAction *m_quitAction;
     QAction *m_tokensAction;

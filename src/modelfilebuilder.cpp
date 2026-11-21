@@ -58,5 +58,11 @@ QString ModelfileBuilder::build(const Config &config)
         result += "\n\"\"\"\n";
     }
 
+    if (!config.renderer.isEmpty())
+        result += "RENDERER " + config.renderer + "\n";
+
+    if (!config.parser.isEmpty())
+        result += "PARSER " + config.parser + "\n";
+
     return result;
 }

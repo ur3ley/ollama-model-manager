@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "ggufimportdialog.h"
+#include "modelsearchdialog.h"
 #include "renamedialog.h"
 #include "modelfilebuilder.h"
 #include "proxydialog.h"
@@ -114,6 +115,9 @@ void MainWindow::setupMenuBar()
     m_importAction = m_fileMenu->addAction(QString(), this, &MainWindow::onImportGGUF);
     m_importAction->setShortcut(QKeySequence("Ctrl+I"));
 
+    m_downloadAction = m_fileMenu->addAction(QString(), this, &MainWindow::onDownloadModel);
+    m_downloadAction->setShortcut(QKeySequence("Ctrl+D"));
+
     m_fileMenu->addSeparator();
 
     m_refreshAction = m_fileMenu->addAction(QString(), this, &MainWindow::onRefreshAll);
@@ -165,6 +169,7 @@ void MainWindow::retranslateUi()
     m_fileMenu->setTitle(T("menu.file"));
     m_newAction->setText(T("menu.newModel"));
     m_importAction->setText(T("menu.importGguf"));
+    m_downloadAction->setText(T("menu.searchModels"));
     m_refreshAction->setText(T("menu.refresh"));
     m_quitAction->setText(T("menu.quit"));
     m_languageMenu->setTitle(T("menu.language"));
@@ -274,6 +279,16 @@ void MainWindow::onImportGGUF()
             onCreateModel(name, content);
         }
     }
+}
+
+void MainWindow::onDownloadModel()
+{
+    ModelSearchDialog dialog(m_cli, this);
+    connect(&dialog, &ModelSearchDialog::modelCreateRequested,
+            this, &MainWindow::onCreateModel);
+    connect(&dialog, &ModelSearchDialog::modelsChanged,
+            this, &MainWindow::onRefreshAll);
+    dialog.exec();
 }
 
 void MainWindow::onCreateModel(const QString &name, const QString &modelfileContent)

@@ -47,6 +47,8 @@ private:
     void setupUI();
     void retranslateUi();
     void clearForm();
+    void updateCapabilities(const OllamaCli::ModelParams &params);
+    void updateTemplateInfo(const OllamaCli::ModelParams &params);
     int maxContextForBase(const QString &baseModel);
     void updateContextInfo(const QString &baseModel, int loadedContextLength);
     void setDefaultCtxLabel(int defaultCtx);
@@ -56,8 +58,10 @@ private:
     OllamaCli *m_cli;
 
     QLabel *m_titleLabel;
+    QLabel *m_capsLabel;
     QGroupBox *m_modelGroup;
     QFormLayout *m_modelLayout;
+    QLabel *m_templateWarnLabel;
     QGroupBox *m_ctxGroup;
     QLabel *m_ctxUnitLabel;
     QGroupBox *m_sampleGroup;
@@ -66,6 +70,8 @@ private:
 
     QComboBox *m_fromCombo;
     QLineEdit *m_nameEdit;
+    QLineEdit *m_rendererEdit;
+    QLineEdit *m_parserEdit;
     QLabel *m_defaultCtxLabel;
     QLabel *m_maxCtxLabel;
 
@@ -98,6 +104,8 @@ private:
 
     QLabel *m_statusLabel;
     QString m_currentEditModel;
+    QStringList m_capabilities;
+    bool m_templateSoftSwitch = false;
     QString m_fromBlob;  // direct blob path for updates, bypasses inheritance
     int m_baseMaxContext = 32768;
 };

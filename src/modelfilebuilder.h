@@ -38,6 +38,13 @@ public:
         QString systemPrompt;
 
         QString templateStr;
+
+        // Ollama >= 0.12: RENDERER / PARSER select the prompt renderer and the
+        // output parser without pasting a raw TEMPLATE. This is the sanctioned
+        // way to override a model whose embedded template is wrong.
+        QString renderer;
+        QString parser;
+
         QMap<QString, QString> extraParams;
     };
 

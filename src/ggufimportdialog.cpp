@@ -7,6 +7,7 @@
 #include <QGroupBox>
 #include <QMessageBox>
 #include <QRegularExpressionValidator>
+#include <QStringList>
 #include "i18n.h"
 
 GGUFImportDialog::GGUFImportDialog(QWidget *parent)
@@ -31,6 +32,21 @@ void GGUFImportDialog::setupUI()
     m_browseBtn = new QPushButton(T("gguf.browse"));
     fileLayout->addWidget(m_browseBtn);
     layout->addWidget(fileGroup);
+
+    m_metaGroup = new QGroupBox(T("gguf.metaGroup"));
+    auto *metaLayout = new QVBoxLayout(m_metaGroup);
+    m_metaLabel = new QLabel();
+    m_metaLabel->setWordWrap(true);
+    m_metaLabel->setTextFormat(Qt::PlainText);
+    m_metaLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    metaLayout->addWidget(m_metaLabel);
+    m_warnLabel = new QLabel();
+    m_warnLabel->setWordWrap(true);
+    m_warnLabel->setTextFormat(Qt::PlainText);
+    m_warnLabel->setVisible(false);
+    metaLayout->addWidget(m_warnLabel);
+    m_metaGroup->setVisible(false);
+    layout->addWidget(m_metaGroup);
 
     auto *nameGroup = new QGroupBox(T("gguf.nameGroup"));
     auto *nameLayout = new QFormLayout(nameGroup);
@@ -72,15 +88,84 @@ void GGUFImportDialog::onBrowse()
     QString path = QFileDialog::getOpenFileName(this, T("gguf.chooseFile"),
                                                  QString(),
                                                  T("gguf.fileFilter"));
-    if (!path.isEmpty()) {
-        m_pathEdit->setText(path);
+    if (!path.isEmpty())
+        setGgufPath(path);
+}
 
-        QFileInfo fi(path);
-        QString baseName = fi.completeBaseName();
-        if (m_nameEdit->text().isEmpty()) {
-            m_nameEdit->setText(baseName + ":latest");
-        }
-        updatePreview();
+void GGUFImportDialog::setGgufPath(const QString &path)
+{
+    m_pathEdit->setText(path);
+
+    QFileInfo fi(path);
+    if (m_nameEdit->text().isEmpty())
+        m_nameEdit->setText(fi.completeBaseName() + ":latest");
+
+    refreshMeta();
+    updatePreview();
+}
+
+QString GGUFImportDialog::metaSummary() const
+{
+    return m_metaLabel->text();
+}
+
+QString GGUFImportDialog::templateWarning() const
+{
+    return m_warnLabel->text();
+}
+
+bool GGUFImportDialog::templateWarningVisible() const
+{
+    // isVisible() is false while the dialog itself is not shown, so report the
+    // requested state instead (used by the offline smoke test).
+    return !m_warnLabel->isHidden();
+}
+
+void GGUFImportDialog::refreshMeta()
+{
+    const QString path = m_pathEdit->text();
+    if (path.isEmpty()) {
+        m_metaGroup->setVisible(false);
+        return;
+    }
+    showMeta(GgufMeta::read(path));
+}
+
+void GGUFImportDialog::showMeta(const GgufMeta &meta)
+{
+    m_metaGroup->setVisible(true);
+    m_warnLabel->setVisible(false);
+
+    if (!meta.ok) {
+        m_metaLabel->setStyleSheet("color: #b00020;");
+        m_metaLabel->setText(T("gguf.metaError").arg(meta.error));
+        return;
+    }
+    m_metaLabel->setStyleSheet("");
+
+    const QString paramCount = meta.parameterCount > 0
+            ? (meta.parameterCount >= 1000000000ull
+                   ? QString::number(meta.parameterCount / 1e9, 'f', 1) + " B"
+                   : meta.parameterCount >= 1000000ull
+                         ? QString::number(meta.parameterCount / 1e6, 'f', 0) + " M"
+                         : QString::number(meta.parameterCount))
+            : T("gguf.valueUnknown");
+
+    QStringList lines;
+    lines << T("gguf.metaArch").arg(meta.architecture.isEmpty() ? T("gguf.valueUnknown") : meta.architecture);
+    lines << T("gguf.metaParams").arg(paramCount);
+    lines << T("gguf.metaQuant").arg(meta.quantization.isEmpty() ? T("gguf.valueUnknown") : meta.quantization);
+    lines << T("gguf.metaCtx").arg(meta.contextLength > 0
+                                   ? QString::number(meta.contextLength)
+                                   : T("gguf.valueUnknown"));
+    lines << T("gguf.metaTemplate").arg(meta.hasChatTemplate ? T("gguf.tplPresent")
+                                                            : T("gguf.tplMissing"));
+    m_metaLabel->setText(lines.join('\n'));
+
+    if (meta.templateHasSoftSwitch) {
+        m_warnLabel->setStyleSheet("color: #b36b00;");
+        m_warnLabel->setText(T("gguf.warnSoftSwitch"));
+        m_warnLabel->setVisible(true);
     }
 }
 

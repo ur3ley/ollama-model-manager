@@ -6,6 +6,9 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QLabel>
+#include <QGroupBox>
+
+#include "ggufmeta.h"
 
 class GGUFImportDialog : public QDialog
 {
@@ -17,6 +20,12 @@ public:
     QString modelName() const;
     QString generatedModelfile() const;
 
+    // Fill the dialog as if the user had picked `path` in the file chooser.
+    void setGgufPath(const QString &path);
+    QString metaSummary() const;
+    QString templateWarning() const;
+    bool templateWarningVisible() const;
+
 private slots:
     void onBrowse();
     void onNameChanged(const QString &text);
@@ -24,6 +33,8 @@ private slots:
 
 private:
     void setupUI();
+    void refreshMeta();
+    void showMeta(const GgufMeta &meta);
 
     QLineEdit *m_pathEdit;
     QPushButton *m_browseBtn;
@@ -32,6 +43,10 @@ private:
     QPlainTextEdit *m_previewEdit;
     QPushButton *m_createBtn;
     QPushButton *m_cancelBtn;
+
+    QGroupBox *m_metaGroup;
+    QLabel *m_metaLabel;
+    QLabel *m_warnLabel;
 };
 
 #endif // GGUFIMPORTDIALOG_H

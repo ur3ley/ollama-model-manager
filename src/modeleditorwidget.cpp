@@ -43,7 +43,28 @@ void ModelEditorWidget::setupUI()
         QRegularExpression("[a-zA-Z0-9._/:\\-]*"), m_nameEdit));
     m_modelLayout->addRow(QString(), m_nameEdit);
 
+    m_rendererEdit = new QLineEdit();
+    m_rendererEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression("[a-zA-Z0-9._\\-]*"), m_rendererEdit));
+    m_modelLayout->addRow(QString(), m_rendererEdit);
+
+    m_parserEdit = new QLineEdit();
+    m_parserEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression("[a-zA-Z0-9._\\-]*"), m_parserEdit));
+    m_modelLayout->addRow(QString(), m_parserEdit);
+
     form->addWidget(m_modelGroup);
+
+    m_capsLabel = new QLabel();
+    m_capsLabel->setStyleSheet("color: #666; font-size: 11px; padding-left: 4px;");
+    m_capsLabel->setWordWrap(true);
+    form->addWidget(m_capsLabel);
+
+    m_templateWarnLabel = new QLabel();
+    m_templateWarnLabel->setWordWrap(true);
+    m_templateWarnLabel->setStyleSheet("color: #b36b00; font-size: 11px; padding-left: 4px;");
+    m_templateWarnLabel->setVisible(false);
+    form->addWidget(m_templateWarnLabel);
 
     m_ctxGroup = new QGroupBox();
     auto *ctxLayout = new QVBoxLayout(m_ctxGroup);
@@ -246,6 +267,28 @@ void ModelEditorWidget::retranslateUi()
     m_nameEdit->setPlaceholderText(T("editor.namePlaceholder"));
     m_nameEdit->setToolTip(T("editor.nameTip"));
 
+    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_rendererEdit)))
+        l->setText(T("editor.renderer"));
+    m_rendererEdit->setPlaceholderText(T("editor.directivePlaceholder"));
+    m_rendererEdit->setToolTip(T("editor.rendererTip"));
+    if (auto *l = qobject_cast<QLabel *>(m_modelLayout->labelForField(m_parserEdit)))
+        l->setText(T("editor.parser"));
+    m_parserEdit->setPlaceholderText(T("editor.directivePlaceholder"));
+    m_parserEdit->setToolTip(T("editor.parserTip"));
+
+    if (m_capabilities.isEmpty()) {
+        m_capsLabel->clear();
+        m_capsLabel->setVisible(false);
+    } else {
+        m_capsLabel->setText(T("editor.capabilities").arg(m_capabilities.join(", ")));
+        m_capsLabel->setToolTip(T("editor.capsTip"));
+        m_capsLabel->setVisible(true);
+    }
+
+    m_templateWarnLabel->setVisible(m_templateSoftSwitch);
+    if (m_templateSoftSwitch)
+        m_templateWarnLabel->setText(T("editor.templateSoftSwitch"));
+
     m_ctxGroup->setTitle(T("editor.ctxGroup"));
     m_numCtxCheck->setText(T("editor.numCtx"));
     m_numCtxCheck->setToolTip(T("editor.numCtxTip"));
@@ -285,8 +328,31 @@ void ModelEditorWidget::retranslateUi()
     m_clearBtn->setToolTip(T("editor.clearTip"));
 }
 
-void ModelEditorWidget::setAvailableModels(const QStringList &models)
+void ModelEditorWidget::updateCapabilities(const OllamaCli::ModelParams &params)
 {
+    m_capabilities = params.capabilities;
+    if (m_capabilities.isEmpty()) {
+        m_capsLabel->clear();
+        m_capsLabel->setVisible(false);
+        return;
+    }
+    m_capsLabel->setText(T("editor.capabilities").arg(m_capabilities.join(", ")));
+    m_capsLabel->setToolTip(T("editor.capsTip"));
+    m_capsLabel->setVisible(true);
+}
+
+void ModelEditorWidget::updateTemplateInfo(const OllamaCli::ModelParams &params)
+{
+    const QString &t = params.templateStr;
+    m_templateSoftSwitch = t.contains(QLatin1String("IsThinkSet"))
+            || t.contains(QLatin1String("/no_think"))
+            || t.contains(QLatin1String("/think"));
+    m_templateWarnLabel->setVisible(m_templateSoftSwitch);
+    if (m_templateSoftSwitch)
+        m_templateWarnLabel->setText(T("editor.templateSoftSwitch"));
+}
+
+void ModelEditorWidget::setAvailableModels(const QStringList &models){
     QString current = m_fromCombo->currentText();
     m_fromCombo->blockSignals(true);
     m_fromCombo->clear();
@@ -328,6 +394,14 @@ void ModelEditorWidget::setCreateMode()
 
     m_systemPromptCheck->setChecked(false);
     m_systemPromptEdit->clear();
+
+    m_rendererEdit->clear();
+    m_parserEdit->clear();
+    m_capabilities.clear();
+    m_capsLabel->clear();
+    m_capsLabel->setVisible(false);
+    m_templateSoftSwitch = false;
+    m_templateWarnLabel->setVisible(false);
 
     m_defaultCtxLabel->clear();
     m_maxCtxLabel->clear();
@@ -425,6 +499,11 @@ void ModelEditorWidget::loadModel(const QString &modelName)
         m_systemPromptEdit->setPlainText(params.systemPrompt);
 
     setEditMode(modelName);
+
+    m_rendererEdit->setText(params.renderer);
+    m_parserEdit->setText(params.parser);
+    updateCapabilities(params);
+    updateTemplateInfo(params);
 
     updateContextInfo(m_fromCombo->currentText(), params.contextLength);
 
@@ -547,6 +626,9 @@ ModelfileBuilder::Config ModelEditorWidget::collectConfig()
 
     config.enableSystemPrompt = m_systemPromptCheck->isChecked();
     config.systemPrompt = m_systemPromptEdit->toPlainText().trimmed();
+
+    config.renderer = m_rendererEdit->text().trimmed();
+    config.parser = m_parserEdit->text().trimmed();
 
     return config;
 }

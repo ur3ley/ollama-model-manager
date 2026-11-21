@@ -19,7 +19,14 @@ set(SOURCES
     src/modellistwidget.cpp
     src/modeleditorwidget.cpp
     src/modelfilebuilder.cpp
+    src/ggufmeta.cpp
     src/ggufimportdialog.cpp
+    src/hfclient.cpp
+    src/registryclient.cpp
+    src/modelbrowserpanel.cpp
+    src/modelfilters.cpp
+    src/provenance.cpp
+    src/modelsearchdialog.cpp
     src/renamedialog.cpp
     src/tokenmanager.cpp
     src/tokendialog.cpp
@@ -41,7 +48,14 @@ set(HEADERS
     src/modellistwidget.h
     src/modeleditorwidget.h
     src/modelfilebuilder.h
+    src/ggufmeta.h
     src/ggufimportdialog.h
+    src/hfclient.h
+    src/registryclient.h
+    src/modelbrowserpanel.h
+    src/modelfilters.h
+    src/provenance.h
+    src/modelsearchdialog.h
     src/renamedialog.h
     src/tokenmanager.h
     src/tokendialog.h
@@ -85,6 +99,108 @@ add_executable(proxy-selftest
 )
 target_include_directories(proxy-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(proxy-selftest PRIVATE Qt6::Core Qt6::Network)
+
+# Offline self-test for the GGUF metadata reader: builds synthetic GGUF files
+# in a temp dir, no Ollama and no real models needed.
+#   ./ggufmeta-selftest
+add_executable(ggufmeta-selftest
+    tests/ggufmeta-selftest.cpp
+    src/ggufmeta.cpp
+    src/ggufmeta.h
+)
+target_include_directories(ggufmeta-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ggufmeta-selftest PRIVATE Qt6::Core)
+
+# Offline smoke test for the import dialog: needs Qt Widgets but runs with the
+# offscreen platform plugin, so no display is required.
+#   QT_QPA_PLATFORM=offscreen ./ggufimportdialog-selftest
+add_executable(ggufimportdialog-selftest
+    tests/ggufimportdialog-selftest.cpp
+    src/ggufimportdialog.cpp
+    src/ggufimportdialog.h
+    src/ggufmeta.cpp
+    src/ggufmeta.h
+    src/i18n.cpp
+    src/i18n.h
+)
+target_include_directories(ggufimportdialog-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ggufimportdialog-selftest PRIVATE Qt6::Widgets Qt6::Core)
+
+# Offline self-test for the Modelfile parsing helpers (`ollama show --modelfile`).
+#   ./modelfile-parse-selftest [FILE]
+add_executable(modelfile-parse-selftest
+    tests/modelfile-parse-selftest.cpp
+    src/ollamacli.cpp
+    src/ollamacli.h
+)
+target_include_directories(modelfile-parse-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(modelfile-parse-selftest PRIVATE Qt6::Core)
+
+# Offline self-test for the HuggingFace client helpers (JSON parsing, file
+# classification, model naming). No network access.
+#   ./hfclient-selftest
+add_executable(hfclient-selftest
+    tests/hfclient-selftest.cpp
+    src/hfclient.cpp
+    src/hfclient.h
+)
+target_include_directories(hfclient-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(hfclient-selftest PRIVATE Qt6::Core Qt6::Network)
+
+# Offline self-test for the ollama.com HTML parsers.
+#   ./registryclient-selftest
+add_executable(registryclient-selftest
+    tests/registryclient-selftest.cpp
+    src/registryclient.cpp
+    src/registryclient.h
+)
+target_include_directories(registryclient-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(registryclient-selftest PRIVATE Qt6::Core Qt6::Network)
+
+# Smoke test for the unified search/install dialog (offscreen; --live/--pull use
+# network and ollama).
+#   QT_QPA_PLATFORM=offscreen ./modelsearchdialog-selftest
+add_executable(modelsearchdialog-selftest
+    tests/modelsearchdialog-selftest.cpp
+    src/modelsearchdialog.cpp
+    src/modelsearchdialog.h
+    src/modelbrowserpanel.cpp
+    src/modelbrowserpanel.h
+    src/modelfilters.cpp
+    src/modelfilters.h
+    src/provenance.cpp
+    src/provenance.h
+    src/registryclient.cpp
+    src/registryclient.h
+    src/hfclient.cpp
+    src/hfclient.h
+    src/ollamacli.cpp
+    src/ollamacli.h
+    src/i18n.cpp
+    src/i18n.h
+)
+target_include_directories(modelsearchdialog-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(modelsearchdialog-selftest PRIVATE Qt6::Widgets Qt6::Network)
+
+# Offline self-test for the hub filter logic.
+#   ./modelfilters-selftest
+add_executable(modelfilters-selftest
+    tests/modelfilters-selftest.cpp
+    src/modelfilters.cpp
+    src/modelfilters.h
+)
+target_include_directories(modelfilters-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(modelfilters-selftest PRIVATE Qt6::Core)
+
+# Offline self-test for the provenance store (models.json).
+#   ./provenance-selftest
+add_executable(provenance-selftest
+    tests/provenance-selftest.cpp
+    src/provenance.cpp
+    src/provenance.h
+)
+target_include_directories(provenance-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(provenance-selftest PRIVATE Qt6::Core)
 
 # Copy language files next to the binary so it works from the build tree.
 # Runs on every build: editing an .ini alone must not require relinking.
