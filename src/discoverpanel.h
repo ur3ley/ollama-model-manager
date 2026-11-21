@@ -139,12 +139,16 @@ private:
     QString m_pendingCreateName;
     QString m_pendingCreateRepo;
     QString m_pendingCreateFile;
+    // Downloaded GGUF sources of the model being created; removed after a
+    // successful import, because Ollama keeps its own copy in the blob store.
+    QStringList m_pendingCreateSources;
     bool m_tokenLoaded = false;    // wallet read already attempted
 
     QStringList m_queueFiles;      // parts still to download, part order
     QList<qint64> m_queueSizes;    // planned bytes per part (0 when unknown)
     QString m_queueFirstFile;
     QString m_queueLastPath;       // path of the last completed part
+    int m_queueMainCount = 0;      // shards of the model itself (projector follows)
     int m_queueIndex = 0;
     qint64 m_queueDoneBytes = 0;
     qint64 m_queueTotalBytes = 0;

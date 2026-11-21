@@ -14,7 +14,6 @@
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
-#include <QCheckBox>
 #include <QCloseEvent>
 #include <QMessageBox>
 #include <QStandardPaths>
@@ -54,17 +53,6 @@ QString sourceFilePattern(const QString &file)
     return match.hasMatch() ? match.captured(1) + QStringLiteral("-*.gguf") : base;
 }
 
-QString humanBytes(quint64 bytes)
-{
-    constexpr double gib = 1024.0 * 1024.0 * 1024.0;
-    constexpr double tib = gib * 1024.0;
-    if (double(bytes) >= tib)
-        return QString::number(double(bytes) / tib, 'f', 1) + QLatin1Char(' ')
-                + T("hero.unitTb");
-    const double value = double(bytes) / gib;
-    return QString::number(value, 'f', value >= 10.0 ? 0 : 1) + QLatin1Char(' ')
-            + T("hero.unitGb");
-}
 
 } // namespace
 
@@ -563,42 +551,28 @@ void MainWindow::onDeleteModel(const QString &modelName)
     }
     message += QStringLiteral("\n\n") + T("delete.onlyQuant");
 
-    // The GGUF sources are separate files: offer to free them in the same step.
+    // The downloaded GGUF sources are a second full copy; deleting the model
+    // always frees them too, unless the import never finished.
     QStringList sourceFiles;
-    quint64 sourceBytes = 0;
     const Provenance::Entry prov = Provenance::instance().lookup(modelName);
     if (!prov.file.isEmpty()) {
         const QDir dir(downloadDir());
-        const QStringList names = dir.entryList({sourceFilePattern(prov.file)}, QDir::Files);
-        for (const QString &name : names) {
-            const QFileInfo info(dir.filePath(name));
-            sourceBytes += quint64(info.size());
-            sourceFiles << info.filePath();
-        }
+        for (const QString &name : dir.entryList({sourceFilePattern(prov.file)}, QDir::Files))
+            sourceFiles << dir.filePath(name);
     }
 
     QMessageBox box(icon, T("delete.title"), message, buttons, this);
-    QCheckBox *dropSources = nullptr;
-    if (!sourceFiles.isEmpty()) {
-        dropSources = new QCheckBox(T("delete.alsoSources").arg(humanBytes(sourceBytes)));
-        box.setCheckBox(dropSources);
-    }
-
     if (box.exec() == QMessageBox::Yes) {
-        const bool removeSources = dropSources && dropSources->isChecked();
         // The model may have a provenance record (source repo + file). Drop it
         // together with the model, otherwise the browser keeps claiming the
         // quant is "downloaded" after the model is gone.
         connect(m_cli, &OllamaCli::deleteFinished, this,
-                [modelName, sourceFiles, removeSources](bool ok, const QString &) {
+                [modelName, sourceFiles](bool ok, const QString &) {
             if (!ok)
                 return;
             Provenance::instance().remove(modelName);
-            if (!removeSources)
-                return;
             for (const QString &path : sourceFiles) {
                 QFile::remove(path);
-                // A stale `.part` of the same shard is useless without the rest.
                 QFile::remove(path + QStringLiteral(".part"));
             }
         }, Qt::SingleShotConnection);

@@ -1,6 +1,7 @@
 #include "discoverpanel.h"
 
 #include "designtokens.h"
+#include "combohighlightdelegate.h"
 #include "hfauth.h"
 #include "hftokendialog.h"
 #include "hfvariants.h"
@@ -8,6 +9,7 @@
 #include "memoryinfo.h"
 #include "modelbrowserpanel.h"
 #include "ollamacli.h"
+#include "popupcombobox.h"
 #include "provenance.h"
 #include "pullprogress.h"
 #include "quantmatch.h"
@@ -271,10 +273,23 @@ DiscoverPanel::DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent)
         entry.sha = m_repoShas.value(m_pendingCreateRepo);
         Provenance::instance().record(name, entry);
 
+        // Ollama has copied the shards into its blob store: the downloaded
+        // sources are now a second full copy, so drop them.
+        quint64 freed = 0;
+        for (const QString &path : std::as_const(m_pendingCreateSources)) {
+            const qint64 size = QFileInfo(path).size();
+            if (QFile::remove(path))
+                freed += quint64(qMax<qint64>(size, 0));
+            QFile::remove(path + QStringLiteral(".part"));
+        }
+        m_pendingCreateSources.clear();
+
         refreshInstalled();
         if (!m_pendingItemId.isEmpty())
             applyHfVariants(m_pendingItemId);
-        m_panel->setStatus(T("search.installed").arg(name));
+        m_panel->setStatus(freed > 0
+                ? T("browser.installedCleaned").arg(name, humanSize(qint64(freed)))
+                : T("search.installed").arg(name));
         emit installedChanged();
     });
 
@@ -301,13 +316,17 @@ void DiscoverPanel::setupUi()
     row->addWidget(m_searchBtn);
 
     if (isOllama()) {
-        m_sortCombo = new QComboBox();
+        m_sortCombo = new PopupComboBox();
+        m_sortCombo->view()->setItemDelegate(
+                new ComboHighlightDelegate(m_sortCombo->view()));
         m_sortCombo->addItems({T("sort.recommended"), T("sort.pulls"), T("sort.name")});
         row->addWidget(m_sortCombo);
         connect(m_sortCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &DiscoverPanel::onSearch);
     } else {
-        m_hfSortCombo = new QComboBox();
+        m_hfSortCombo = new PopupComboBox();
+        m_hfSortCombo->view()->setItemDelegate(
+                new ComboHighlightDelegate(m_hfSortCombo->view()));
         m_hfSortCombo->addItems({T("sort.downloads"), T("sort.newest"), T("sort.trending"),
                                  T("sort.updated"), T("sort.likes")});
         row->addWidget(m_hfSortCombo);
@@ -535,7 +554,15 @@ void DiscoverPanel::onAction(const QString &itemId, const QString &variantId)
         return;
 
     const QString dir = defaultDownloadDir();
-    const quint64 required = requiredSpaceBytes(chosen.size);
+    quint64 needed = chosen.size;
+    // The repo's vision projector is downloaded together with the model.
+    for (const HfVariant &other : std::as_const(m_hfVariants)) {
+        if (other.projector) {
+            needed += other.size;
+            break;
+        }
+    }
+    const quint64 required = requiredSpaceBytes(needed);
     const quint64 free = freeDiskBytes(dir);
     if (free > 0 && required > free) {
         m_panel->setStatus(T("browser.notEnoughSpace")
@@ -555,9 +582,25 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
     m_queueSizes = variant.sizes;
     while (m_queueSizes.size() < m_queueFiles.size())
         m_queueSizes.append(0);
+    m_queueMainCount = m_queueFiles.size();
     m_queueIndex = 0;
     m_queueDoneBytes = 0;
     m_queueTotalBytes = qMax<qint64>(variant.size, 0);
+
+    // A vision projector is a separate mmproj GGUF. Ollama attaches it through a
+    // second FROM line, and without it the imported model rejects images with
+    // "image input is not supported". Pull the first projector of the repo too.
+    for (const HfVariant &other : std::as_const(m_hfVariants)) {
+        if (!other.projector || other.files.isEmpty())
+            continue;
+        for (int i = 0; i < other.files.size(); ++i) {
+            m_queueFiles.append(other.files.at(i));
+            m_queueSizes.append(other.sizes.value(i));
+        }
+        m_queueTotalBytes += qMax<qint64>(other.size, 0);
+        break;
+    }
+
     m_queuePartTotal = 0;
     m_queueLastPath.clear();
     m_queueActive = true;
@@ -626,16 +669,25 @@ void DiscoverPanel::stopHfQueue()
 void DiscoverPanel::finishHfDownload()
 {
     const QString name = HfClient::modelNameFor(m_pendingRepo, m_queueFirstFile);
-    const bool split = m_queueFiles.size() > 1;
-    QString from = m_queueLastPath;
-    if (split) {
-        // Ollama expands the wildcard over the shard names it finds on disk;
-        // the parts keep their original names, so `prefix-*.gguf` matches all
-        // of them without enumerating 00001…0000N.
-        from = QDir(defaultDownloadDir()).filePath(splitWildcardPattern(m_queueFirstFile));
-    } else if (from.isEmpty()) {
-        // A single file that was already on disk (nothing to download).
-        from = QDir(defaultDownloadDir()).filePath(QFileInfo(m_pendingFile).fileName());
+    const QString dir = defaultDownloadDir();
+    const bool split = m_queueMainCount > 1;
+    // Always derive the main file from the first shard: the last downloaded
+    // file may already be the projector.
+    QString from = split ? splitWildcardPattern(m_queueFirstFile)
+                         : QFileInfo(m_queueFirstFile).fileName();
+    from = QDir(dir).filePath(from);
+
+    QString content = QStringLiteral("FROM ") + from + QLatin1Char('\n');
+    if (m_queueFiles.size() > m_queueMainCount) {
+        const QString projector = m_queueFiles.at(m_queueMainCount);
+        const QString projectorFrom = QDir(dir).filePath(splitWildcardPattern(projector));
+        content += QStringLiteral("FROM ") + projectorFrom + QLatin1Char('\n');
+    }
+    // Remember every downloaded shard (main + projector) before the queue is
+    // cleared: they are deleted once `ollama create` has copied them.
+    m_pendingCreateSources.clear();
+    for (const QString &file : std::as_const(m_queueFiles)) {
+        m_pendingCreateSources << QDir(dir).filePath(QFileInfo(file).fileName());
     }
     stopHfQueue();
 
@@ -650,7 +702,7 @@ void DiscoverPanel::finishHfDownload()
     // lock the picker, but hide "Cancel" — the import cannot be interrupted.
     m_panel->setBusy(true, -1, false);
     m_panel->setStatus(T("browser.creating").arg(name));
-    emit modelCreateRequested(name, QStringLiteral("FROM ") + from + QLatin1Char('\n'));
+    emit modelCreateRequested(name, content);
 }
 
 void DiscoverPanel::applyHfVariants(const QString &itemId)
