@@ -9,6 +9,8 @@
 class OllamaCli;
 class QLabel;
 class QPushButton;
+class QShowEvent;
+class QTimer;
 class UsageMeter;
 
 // Hero strip above the installed-models splitter: a one-glance answer to
@@ -29,7 +31,12 @@ public:
 signals:
     void downloadRequested();
 
+protected:
+    void showEvent(QShowEvent *event) override;
+
 private:
+    /** One timer tick: the cheap numbers every second, the disk every fifth. */
+    void tick();
     void retranslateUi();
     void refreshStatus();
     void refreshDisk();
@@ -46,6 +53,8 @@ private:
     UsageMeter *m_ramMeter;
     UsageMeter *m_diskMeter;
     QPushButton *m_downloadBtn;
+    QTimer *m_tick = nullptr;
+    int m_diskTicks = 0;
 
     InstalledSummary m_summary;
     bool m_ollamaOk = false;

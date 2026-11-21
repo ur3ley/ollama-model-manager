@@ -14,11 +14,36 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QShowEvent>
+#include <QStandardPaths>
 #include <QStorageInfo>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
+
+// The hero refreshes itself: the RAM line and the Ollama dot every second, the
+// disk line every fifth tick (QStorageInfo can block on a network mount).
+constexpr int kTickMs = 1000;
+constexpr int kDiskEveryTicks = 5;
+
+// render() runs on that timer too, and setText() forces a relayout, so strings
+// are only assigned when they really changed.
+void setLabelText(QLabel *label, const QString &text)
+{
+    if (label->text() != text)
+        label->setText(text);
+}
+
+// Same idea for the semantic colour: repolishing a label is not free.
+void setLabelRole(QWidget *widget, const char *role)
+{
+    const QString value = role && *role ? QString::fromLatin1(role) : QString();
+    if (widget->property("role").toString() == value)
+        return;
+    tokens::setRole(widget, role);
+}
 
 // OLLAMA_HOST may be "host:port", "http://host:port" or a unix socket.
 // The hero only reports the port, the default one when nothing is configured.
@@ -85,7 +110,12 @@ public:
         layout->addWidget(m_bar);
     }
 
-    void setText(const QString &text) { m_label->setText(text); }
+    void setText(const QString &text)
+    {
+        if (m_label->text() == text)
+            return;
+        m_label->setText(text);
+    }
 
     void setPercent(int percent)
     {
@@ -175,6 +205,38 @@ StartPageHeader::StartPageHeader(OllamaCli *cli, QWidget *parent)
     refreshDisk();
     refreshMemory();
     retranslateUi();
+
+    // RAM/disk/status drift while the window just sits there; the model list
+    // itself is only reloaded on events, never from here.
+    m_tick = new QTimer(this);
+    m_tick->setInterval(kTickMs);
+    connect(m_tick, &QTimer::timeout, this, &StartPageHeader::tick);
+    m_tick->start();
+}
+
+void StartPageHeader::showEvent(QShowEvent *event)
+{
+    QFrame::showEvent(event);
+    // The timer idles while the strip is hidden (another tab is open), so catch
+    // up immediately. The disk counter is left alone on purpose: resetting it
+    // here would flip the disk line on every tab switch.
+    refreshMemory();
+    refreshStatus();
+    render();
+}
+
+void StartPageHeader::tick()
+{
+    // Hidden means the installed tab is not current; skip the reads entirely.
+    if (!isVisible())
+        return;
+    refreshMemory();
+    refreshStatus();
+    if (++m_diskTicks >= kDiskEveryTicks) {
+        m_diskTicks = 0;
+        refreshDisk();
+    }
+    render();
 }
 
 void StartPageHeader::updateSummary(const InstalledSummary &summary)
@@ -193,7 +255,12 @@ void StartPageHeader::retranslateUi()
 
 void StartPageHeader::refreshStatus()
 {
-    const QString path = m_cli ? m_cli->ollamaPath() : QString();
+    // Look the binary up again on every refresh: a reinstall or a moved
+    // `ollama` must light the dot without waiting for the next modelsLoaded.
+    // Purely local — no network probe, the port is only reported in the tooltip.
+    QString path = QStandardPaths::findExecutable(QStringLiteral("ollama"));
+    if (path.isEmpty() && m_cli)
+        path = m_cli->ollamaPath();
     // OllamaCli keeps a bare "ollama" when the lookup failed; treat only a real
     // executable as found, otherwise the hero would always claim a healthy CLI.
     m_ollamaOk = !path.isEmpty() && QFileInfo(path).isExecutable();
@@ -227,21 +294,24 @@ void StartPageHeader::render()
     m_metrics->setVisible(showMetrics);
     m_hint->setVisible(empty);
     m_downloadBtn->setVisible(empty);
-    m_downloadBtn->setText(T("hero.emptyCta"));
+    const QString cta = T("hero.emptyCta");
+    if (m_downloadBtn->text() != cta)
+        m_downloadBtn->setText(cta);
 
     if (empty) {
-        m_title->setText(T("hero.emptyTitle"));
+        setLabelText(m_title, T("hero.emptyTitle"));
         m_title->setToolTip(QString());
         m_statusDot->setPixmap(dotIcon(m_ollamaOk).pixmap(10, 10));
-        m_hint->setText(m_ollamaOk ? T("hero.emptyHint") : T("hero.ollamaMissing"));
-        tokens::setRole(m_hint, m_ollamaOk ? nullptr : "danger");
+        setLabelText(m_hint, m_ollamaOk ? T("hero.emptyHint") : T("hero.ollamaMissing"));
+        setLabelRole(m_hint, m_ollamaOk ? nullptr : "danger");
         return;
     }
 
     const QString count = QString::number(m_summary.quants);
     const QString size = sizeText(m_summary.bytes);
-    m_title->setText((m_summary.quants == 1 ? T("hero.modelsOne") : T("hero.models"))
-                             .arg(count, size));
+    setLabelText(m_title,
+                 (m_summary.quants == 1 ? T("hero.modelsOne") : T("hero.models"))
+                         .arg(count, size));
     m_title->setToolTip(T("hero.summaryTip").arg(count, QString::number(m_summary.repositories)));
 
     const auto percent = [](quint64 used, quint64 total) {
@@ -269,8 +339,8 @@ void StartPageHeader::render()
     }
 
     m_statusDot->setPixmap(dotIcon(m_ollamaOk).pixmap(10, 10));
-    m_statusText->setText(m_ollamaOk ? T("hero.ollamaLabel") : T("hero.ollamaMissing"));
-    tokens::setRole(m_statusText, m_ollamaOk ? nullptr : "danger");
+    setLabelText(m_statusText, m_ollamaOk ? T("hero.ollamaLabel") : T("hero.ollamaMissing"));
+    setLabelRole(m_statusText, m_ollamaOk ? nullptr : "danger");
     m_statusText->setToolTip(m_ollamaOk
                                      ? T("hero.ollamaOk").arg(m_ollamaPath, ollamaPort())
                                      : T("hero.ollamaMissing"));
