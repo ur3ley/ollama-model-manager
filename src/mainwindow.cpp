@@ -2,6 +2,7 @@
 #include "bindsourcedialog.h"
 #include "ggufimportdialog.h"
 #include "discoverpanel.h"
+#include "downloadsdialog.h"
 #include "installservice.h"
 #include "provenance.h"
 #include "registryclient.h"
@@ -22,13 +23,19 @@
 #include <QStatusBar>
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QTabWidget>
 #include <QTimer>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QProcess>
 #include <QProgressDialog>
+#include <QStyle>
+#include <QToolButton>
 
 #include <memory>
+#include "format.h"
 #include "i18n.h"
 #include "theme.h"
 
@@ -44,6 +51,37 @@ MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *par
         m_tokens = new TokenManager(this);
     setupUI();
     setupMenuBar();
+
+    // Two always-visible download pills in the tab-bar corner: Ollama pulls
+    // and HuggingFace imports each have their own counter and popup, so the
+    // two queues never mix.
+    auto *pillBox = new QWidget(this);
+    auto *pillLayout = new QHBoxLayout(pillBox);
+    pillLayout->setContentsMargins(0, 0, 0, 0);
+    pillLayout->setSpacing(6);
+    auto makePill = [this]() {
+        auto *pill = new QToolButton(this);
+        pill->setObjectName(QStringLiteral("pullIndicator"));
+        pill->setAutoRaise(true);
+        // QToolButton defaults to icon-only; without an icon the text (our
+        // whole content) would not be drawn and the counter would be invisible.
+        pill->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        pill->setCursor(Qt::PointingHandCursor);
+        return pill;
+    };
+    m_ollamaPill = makePill();
+    m_hfPill = makePill();
+    pillLayout->addWidget(m_ollamaPill);
+    pillLayout->addWidget(m_hfPill);
+    m_tabs->setCornerWidget(pillBox, Qt::TopRightCorner);
+    connect(m_ollamaPill, &QToolButton::clicked, this, [this]() { showDownloadsPopup(true); });
+    connect(m_hfPill, &QToolButton::clicked, this, [this]() { showDownloadsPopup(false); });
+    connect(m_cli, &OllamaCli::pullActivityChanged, this, &MainWindow::updatePullActivity);
+    connect(m_hfPanel, &DiscoverPanel::hfActivityChanged, this, [this](int pending) {
+        m_hfCount = pending;
+        applyPullIndicator();
+    });
+
     retranslateUi();
     connect(I18n::instance(), &I18n::languageChanged, this, &MainWindow::retranslateUi);
 
@@ -266,6 +304,8 @@ void MainWindow::setupMenuBar()
         if (m_hfPanel)
             m_hfPanel->openTokenDialog();
     });
+    m_cleanupPartialsAction = m_toolsMenu->addAction(QString(),
+            this, &MainWindow::cleanupOllamaPartials);
     m_findSourcesAction = m_toolsMenu->addAction(QString(),
                                                  this, &MainWindow::onAutoFindSources);
 
@@ -328,8 +368,106 @@ void MainWindow::retranslateUi()
     if (m_hfTokenAction)
         m_hfTokenAction->setText(T("menu.hfToken"));
     m_findSourcesAction->setText(T("menu.findSources"));
+    m_cleanupPartialsAction->setText(T("menu.cleanupPartials"));
     m_helpMenu->setTitle(T("menu.help"));
     m_aboutAction->setText(T("menu.about"));
+    applyPullIndicator();
+}
+
+void MainWindow::updatePullActivity(int active, int queued)
+{
+    m_pullActive = active;
+    m_pullQueued = queued;
+    applyPullIndicator();
+}
+
+void MainWindow::applyPullIndicator()
+{
+    const int ollama = m_pullActive + m_pullQueued;
+    auto updatePill = [](QToolButton *pill, int count, const QString &text,
+                         const QString &tip) {
+        if (!pill)
+            return;
+        // Always visible: grey with "0" when idle, accent when non-zero.
+        pill->setVisible(true);
+        pill->setText(text);
+        pill->setToolTip(tip);
+        const bool active = count > 0;
+        if (pill->property("active").toBool() != active) {
+            pill->setProperty("active", active);
+            // The sheet matches the dynamic property; re-polish to switch
+            // between the grey idle pill and the accent one.
+            pill->style()->unpolish(pill);
+            pill->style()->polish(pill);
+            pill->update();
+        }
+    };
+    updatePill(m_ollamaPill, ollama, T("downloads.pillOllama").arg(ollama),
+               T("downloads.tooltipOllama").arg(ollama));
+    updatePill(m_hfPill, m_hfCount, T("downloads.pillHf").arg(m_hfCount),
+               T("downloads.tooltipHf").arg(m_hfCount));
+}
+
+void MainWindow::cleanupOllamaPartials()
+{
+    const QStringList files = m_cli->stalePartialBlobs();
+    if (files.isEmpty()) {
+        QMessageBox::information(this, T("downloads.cleanupTitle"),
+                                 T("downloads.cleanupNothing"));
+        return;
+    }
+    qint64 total = 0;
+    for (const QString &file : files)
+        total += QFileInfo(file).size();
+    const auto answer = QMessageBox::question(
+            this, T("downloads.cleanupTitle"),
+            T("downloads.cleanupText").arg(files.size()).arg(format::byteSize(total)),
+            QMessageBox::Yes | QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QStringList failed;
+    for (const QString &file : files) {
+        if (!QFile::remove(file))
+            failed.append(file);
+    }
+    if (failed.isEmpty()) {
+        QMessageBox::information(this, T("downloads.cleanupTitle"),
+                                 T("downloads.cleanupDone"));
+        return;
+    }
+    // Owned by the ollama service user: one admin prompt via pkexec.
+    QStringList args{QStringLiteral("rm"), QStringLiteral("-f"), QStringLiteral("--")};
+    args += failed;
+    if (QProcess::startDetached(QStringLiteral("pkexec"), args))
+        QMessageBox::information(this, T("downloads.cleanupTitle"),
+                                 T("downloads.cleanupStarted").arg(failed.size()));
+    else
+        QMessageBox::warning(this, T("downloads.cleanupTitle"),
+                             T("downloads.cleanupFailed"));
+}
+
+void MainWindow::showDownloadsPopup(bool ollama)
+{
+    DownloadsDialog **slot = ollama ? &m_downloadsOllama : &m_downloadsHf;
+    if (!*slot)
+        *slot = new DownloadsDialog(m_cli, m_hfPanel, ollama, this);
+    DownloadsDialog *dialog = *slot;
+    dialog->adjustSize();
+    // The pill sits in the tab-bar corner: drop the panel under it, and flip
+    // above only when there is no room below.
+    QToolButton *pill = ollama ? m_ollamaPill : m_hfPill;
+    const QPoint below = pill->mapToGlobal(QPoint(0, pill->height()));
+    int y = below.y() + 6;
+    const QRect available = screen() ? screen()->availableGeometry() : QRect();
+    if (available.isValid() && y + dialog->height() > available.bottom() + 1)
+        y = pill->mapToGlobal(QPoint(0, 0)).y() - dialog->height() - 6;
+    int x = below.x() + pill->width() - dialog->width();
+    if (available.isValid())
+        x = qBound(available.left(), x,
+                   qMax(available.left(), available.right() - dialog->width() + 1));
+    dialog->move(x, y);
+    dialog->show();
 }
 
 void MainWindow::onRefreshAll()

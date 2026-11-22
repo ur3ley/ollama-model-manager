@@ -19,6 +19,9 @@ class DiscoverPanel;
 class StartPageHeader;
 class QTabWidget;
 class QTimer;
+class QLabel;
+class QToolButton;
+class DownloadsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -67,6 +70,12 @@ private:
     void buildLanguageMenu();
     void syncThemeActions();
     void retranslateUi();
+    /** Global "↓ N" status-bar counter: pulls running plus pulls waiting. */
+    void updatePullActivity(int active, int queued);
+    void applyPullIndicator();
+    void showDownloadsPopup(bool ollama);
+    /** Tools → remove Ollama's stale `-partial` blobs (asks for admin if needed). */
+    void cleanupOllamaPartials();
     /** Rename a quant, moving its provenance entry; content is applied afterwards. */
     void startRename(const QString &oldName, const QString &newName, const QString &content);
     /** Second half of onDeleteModel(): the dialog, once the blob usage is known. */
@@ -79,6 +88,15 @@ private:
     TokenManager *m_tokens;
     ProxyService *m_proxy;
     bool m_hideOnClose = false;
+    // Global download counter (status bar, right corner): pulls of any tab plus
+    // the HuggingFace import, which has its own downloader.
+    QToolButton *m_ollamaPill = nullptr;
+    QToolButton *m_hfPill = nullptr;
+    int m_pullActive = 0;
+    int m_pullQueued = 0;
+    int m_hfCount = 0;
+    DownloadsDialog *m_downloadsOllama = nullptr;
+    DownloadsDialog *m_downloadsHf = nullptr;
     ModelListWidget *m_listWidget;
     ModelEditorWidget *m_editorWidget;
     QTabWidget *m_tabs = nullptr;
@@ -110,6 +128,7 @@ private:
     QAction *m_proxyAction;
     QAction *m_hfTokenAction = nullptr;
     QAction *m_findSourcesAction;
+    QAction *m_cleanupPartialsAction;
     QAction *m_aboutAction;
     QActionGroup *m_langGroup;
     QActionGroup *m_themeGroup = nullptr;

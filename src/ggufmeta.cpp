@@ -38,6 +38,8 @@ struct Value {
     QString str;
     bool isUint = false;
     quint64 u = 0;
+    bool isFloat = false;
+    double f = 0;
 };
 
 bool readLength(QDataStream &ds, quint64 &len)
@@ -129,6 +131,15 @@ bool consumeValue(QDataStream &ds, quint32 type, Value *out)
                 return false;
             out->isUint = (type != T_FLOAT32 && type != T_FLOAT64);
             out->u = raw;
+            if (type == T_FLOAT32) {
+                float value = 0;
+                std::memcpy(&value, &raw, sizeof(value));
+                out->f = double(value);
+                out->isFloat = true;
+            } else if (type == T_FLOAT64) {
+                std::memcpy(&out->f, &raw, sizeof(out->f));
+                out->isFloat = true;
+            }
         } else {
             if (ds.skipRawData(size) != size)
                 return false;
@@ -286,7 +297,11 @@ GgufMeta GgufMeta::read(const QString &path)
         const bool wantType = key == QLatin1String("general.file_type");
         const bool wantCtx = key.endsWith(QLatin1String(".context_length"));
         const bool wantTemplate = key == QLatin1String("tokenizer.chat_template");
-        const bool wanted = wantArch || wantName || wantType || wantCtx || wantTemplate;
+        const bool wantTemp = key == QLatin1String("general.sampling.temp");
+        const bool wantTopP = key == QLatin1String("general.sampling.top_p");
+        const bool wantTopK = key == QLatin1String("general.sampling.top_k");
+        const bool wanted = wantArch || wantName || wantType || wantCtx || wantTemplate
+                || wantTemp || wantTopP || wantTopK;
 
         Value v;
         if (!consumeValue(ds, type, wanted ? &v : nullptr)) {
@@ -308,6 +323,12 @@ GgufMeta GgufMeta::read(const QString &path)
             haveFileType = true;
         } else if (wantCtx && v.isUint) {
             meta.contextLength = int(qMin<quint64>(v.u, quint64(std::numeric_limits<int>::max())));
+        } else if (wantTemp && (v.isFloat || v.isUint)) {
+            meta.samplingTemperature = v.isFloat ? v.f : double(v.u);
+        } else if (wantTopP && (v.isFloat || v.isUint)) {
+            meta.samplingTopP = v.isFloat ? v.f : double(v.u);
+        } else if (wantTopK && (v.isFloat || v.isUint)) {
+            meta.samplingTopK = v.isFloat ? int(v.f) : int(v.u);
         }
     }
 

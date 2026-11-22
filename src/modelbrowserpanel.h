@@ -99,9 +99,14 @@ public:
     QString selectedVariantId() const;
     /** Declared download size text of the selected variant ("39GB"), empty when unknown. */
     QString selectedVariantSizeText() const;
+    /** Label of the selected variant row, including download-state badges. */
+    QString selectedVariantText() const;
     void setActionText(const QString &text);
+    /** Per-variant download state: the action button says "queued"/"running". */
+    enum class JobState { None, Queued, Running };
+    void setVariantJobState(const QString &itemId, const QString &variantId, JobState state);
     /** percent < 0 shows an indeterminate bar (total download size unknown). */
-    void setBusy(bool busy, int percent, bool cancellable = true);
+    void setBusy(bool busy, int percent, bool cancellable = true, bool queueable = false);
     void setStatus(const QString &status);
     void setEmptyText(const QString &text);
     /** Expand/collapse the "About this model" block (dev aid + tests). */
@@ -112,6 +117,8 @@ signals:
     void itemSelected(const QString &itemId);
     void variantSelected(const QString &itemId, const QString &variantId);
     void actionRequested(const QString &itemId, const QString &variantId);
+    /** The same button doubles as "Отмена" for a queued/running variant. */
+    void cancelVariantRequested(const QString &itemId, const QString &variantId);
     void cancelRequested();
 
 private:
@@ -154,9 +161,15 @@ private:
     QString m_selectedId;
     QString m_actionText;
     QString m_requestedVariant; // item:variant already asked for
+    // item\nvariant -> download state shown instead of "Скачать". Kept apart
+    // from installed flags: a queued/running download is not on disk yet.
+    QHash<QString, JobState> m_jobStates;
     QString m_renderedMarkdown; // readme currently in m_about
     bool m_busy = false;
     bool m_busyCancellable = true;
+    // A registry pull can be queued: while it runs, the list and the variant
+    // picker stay usable so another download can be added to the CLI queue.
+    bool m_queueable = false;
 };
 
 #endif // MODELBROWSERPANEL_H

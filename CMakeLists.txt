@@ -42,6 +42,8 @@ qt_add_library(omm_core STATIC
     src/combohighlightdelegate.h
     src/discoverpanel.cpp
     src/discoverpanel.h
+    src/downloadsdialog.cpp
+    src/downloadsdialog.h
     src/ggufimportdialog.cpp
     src/ggufimportdialog.h
     src/ggufmeta.cpp

@@ -30,6 +30,11 @@ struct GgufMeta
     QString quantization;
     int contextLength = 0;
 
+    // Recommended sampler parameters (`general.sampling.*`), -1 when absent.
+    double samplingTemperature = -1;
+    double samplingTopP = -1;
+    int samplingTopK = -1;
+
     bool hasChatTemplate = false;
     QString chatTemplate;
 

@@ -101,6 +101,9 @@ private:
     QString m_lastLabel;
     qint64 m_lastReceived = -1;
     int m_lastPercent = -2;
+    // Set by prioritizePull(): the process is killed on purpose and the job
+    // goes back to the queue without a finished() signal or a failure state.
+    bool m_requeue = false;
     QString m_lastLine;  // last non-empty CLI line: the error text of a failed pull
 
     // BlobUsage state: the models still to inspect.
@@ -166,6 +169,29 @@ public:
     /** A pull runs or waits in the queue. */
     bool isPulling() const;
 
+    /** One pending pull for the global downloads panel. */
+    struct PullInfo {
+        quint64 id = 0;
+        QString name;
+        bool active = false;
+        int percent = -1;
+    };
+    /** Running pull first, then the waiting ones in start order. */
+    QList<PullInfo> pullList() const;
+    bool cancelPull(quint64 id);
+    /** Move a queued pull by delta (-1 earlier, +1 later); active jobs stay put. */
+    bool movePull(quint64 id, int delta);
+    /** `-partial` blob files older than an hour (safe to delete, no live pull). */
+    QStringList stalePartialBlobs() const;
+    /** Insert a queued pull right before another queued pull. */
+    bool movePullBefore(quint64 draggedId, quint64 targetId);
+    /**
+     * Start a queued pull now. A running pull is suspended (its `ollama pull`
+     * is stopped and put right behind the promoted one); completed blobs are
+     * kept, so it resumes without re-downloading whole layers.
+     */
+    bool prioritizePull(quint64 id);
+
     /**
      * Ollama's model store (the directory holding `blobs/`): $OLLAMA_MODELS,
      * else the root seen in a `FROM <blob>` of a shown model, else the first
@@ -192,6 +218,12 @@ signals:
      * the installed set (status bar, list refresh). Not for result matching.
      */
     void jobFinished(OllamaJob *job);
+    /** Pull pipeline changed: how many pulls run now and how many wait. */
+    void pullActivityChanged(int active, int queued);
+    /** A pull moved from the queue to running (normal start or promotion). */
+    void pullStarted(quint64 id);
+    /** A running pull was pushed back into the queue (user moved it down). */
+    void pullSuspended(quint64 id);
 
 private:
     friend class OllamaJob;
@@ -203,6 +235,8 @@ private:
     /** One `ollama` process for `job` (A-5: the single place that wires QProcess). */
     void runStep(OllamaJob *job, const QStringList &args, const StepDone &done);
     void finish(OllamaJob *job, bool success, const QString &output);
+    /** One place to report the pull pipeline to the global download counter. */
+    void notifyPullActivity();
 
     void startNextPull();
     void startPull(OllamaJob *job);

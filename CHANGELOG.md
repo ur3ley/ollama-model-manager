@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Download queue and manager**: Ollama pulls and HuggingFace imports have separate counters in
+  the tab-bar corner (`O ↓ N` / `H ↓ N`) and separate popups; the running task is on top, the
+  queue below, every row can be cancelled and queued pulls can be dragged onto the running row to
+  start immediately (the previous pull is requeued and resumes from completed blobs). Ollama
+  pulls stay strictly serialized; HuggingFace imports have their own queue.
+- **Incomplete downloads**: cancelling an HF import deletes its partial shards, while an
+  unexpected stop keeps them with size/percent, **Resume** and **Delete** in the HF popup.
+  `Tools → Clean incomplete Ollama downloads…` removes `-partial` blobs older than an hour
+  (never complete models), using `pkexec` only when the service user owns the files.
+- GGUF imports read llama.cpp's `general.sampling.*` recommendations and otherwise write Ollama's
+  defaults (`temperature 0.80`, `top_p 0.90`, `top_k 40`) into the Modelfile.
 - **Model hub**: *Installed* tab with repository cards and a hero strip (models, RAM, disk of
   Ollama's blob store, daemon health); *Ollama* tab (search ollama.com, pull with aggregate
   progress, update marks); *HuggingFace* tab (GGUF repositories, one entry per quant, split
@@ -21,6 +32,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   `BUILD_TESTING`, `OMM_DEV_TOOLS`, `OMM_WARNINGS_AS_ERRORS`.
 
 ### Changed
+- Combo-box popups use a real slim scrollbar (wheel scrolling) instead of Qt's arrow scrollers,
+  and the editor shows Ollama's sampling defaults instead of `0.00` for unset parameters.
 - **`admin_api` defaults to `restricted`**: tokens without the Admin flag can no longer pull,
   create or delete models through the proxy (config without the key → restricted, logged at
   start). Set `admin_api = open` for the old behaviour.

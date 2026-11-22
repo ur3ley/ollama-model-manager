@@ -241,6 +241,39 @@ QLabel[section="true"] { color: @muted; font-size: 11px; font-weight: 600; }
 QLabel[role="danger"] { color: @danger; }
 QLabel[role="warning"] { color: @warning; }
 QLabel[role="success"] { color: @success; }
+/* Global download counter in the tab-bar corner ("↓ 3"), always visible.
+   Neutral while idle, the accent of primary buttons while downloads pending. */
+QToolButton#pullIndicator {
+    background: @surfaceAlt;
+    color: @muted;
+    border: 1px solid @border;
+    border-radius: 8px;
+    padding: 2px 9px;
+    font-weight: 600;
+}
+QToolButton#pullIndicator:hover { border-color: @borderStrong; color: @text; }
+QToolButton#pullIndicator[active="true"] {
+    background: @accentFill;
+    color: @onAccent;
+    border-color: @accentFill;
+}
+QToolButton#pullIndicator[active="true"]:hover {
+    background: @accentHover;
+    border-color: @accentHover;
+    color: @onAccent;
+}
+QDialog#downloadsDialog {
+    /* Same soft accent as a selected repository/model row, with an accent
+       outline so the panel stands out from the window it floats over. */
+    background: @selected;
+    border: 1px solid @accent;
+    border-radius: 10px;
+}
+QWidget[dropTarget="true"] {
+    background: @accentSoft;
+    border: 1px solid @accent;
+    border-radius: 6px;
+}
 
 QMenuBar {
     background: @bg;

@@ -14,7 +14,7 @@ public:
         int numCtx = 32768;
 
         bool enableTemperature = false;
-        double temperature = 0.7;
+        double temperature = 0.8;
 
         bool enableTopP = false;
         double topP = 0.9;

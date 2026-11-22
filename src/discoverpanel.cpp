@@ -6,6 +6,7 @@
 #include "combohighlightdelegate.h"
 #include "hfauth.h"
 #include "hftokendialog.h"
+#include "ggufmeta.h"
 #include "hfvariants.h"
 #include "i18n.h"
 #include "installservice.h"
@@ -21,6 +22,10 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -240,6 +245,34 @@ DiscoverPanel::DiscoverPanel(Source source, InstallService *install, QWidget *pa
         if (ok)
             applyInstalledList(models);
     });
+    // Queue changes from the global downloads panel: the running pull may be
+    // pushed back and another one promoted. Keep the per-variant badges and
+    // this panel's bookkeeping in sync with the job that really runs.
+    connect(m_cli, &OllamaCli::pullSuspended, this, [this](quint64 id) {
+        if (!m_pullJob || m_pullJob->id() != id)
+            return;
+        m_queuedPulls.prepend(QueuedPull{m_pullJob, m_pullItemId, m_pullVariantId});
+        m_panel->setVariantJobState(m_pullItemId, m_pullVariantId,
+                                    ModelBrowserPanel::JobState::Queued);
+        m_pullJob.clear();
+        m_pullItemId.clear();
+        m_pullVariantId.clear();
+    });
+    connect(m_cli, &OllamaCli::pullStarted, this, [this](quint64 id) {
+        for (int i = 0; i < m_queuedPulls.size(); ++i) {
+            const QueuedPull entry = m_queuedPulls.at(i);
+            if (!entry.job || entry.job->id() != id)
+                continue;
+            m_queuedPulls.removeAt(i);
+            m_pullJob = entry.job;
+            m_pullItemId = entry.itemId;
+            m_pullVariantId = entry.variantId;
+            m_panel->setVariantJobState(entry.itemId, entry.variantId,
+                                        ModelBrowserPanel::JobState::Running);
+            m_panel->setStatus(T("search.pulling").arg(entry.variantId));
+            return;
+        }
+    });
     connect(m_hf, &HfClient::downloadProgress, this, &DiscoverPanel::onDownloadProgress);
     connect(m_hf, &HfClient::downloadFinished, this, &DiscoverPanel::onDownloadFinished);
 }
@@ -295,6 +328,8 @@ void DiscoverPanel::setupUi()
     connect(m_panel, &ModelBrowserPanel::itemSelected, this, &DiscoverPanel::onItemSelected);
     connect(m_panel, &ModelBrowserPanel::actionRequested, this, &DiscoverPanel::onAction);
     connect(m_panel, &ModelBrowserPanel::cancelRequested, this, &DiscoverPanel::onCancel);
+    connect(m_panel, &ModelBrowserPanel::cancelVariantRequested,
+            this, &DiscoverPanel::onCancelVariant);
 
     updateFilterButton();
 }
@@ -470,22 +505,55 @@ void DiscoverPanel::onItemSelected(const QString &itemId)
 void DiscoverPanel::onAction(const QString &itemId, const QString &variantId)
 {
     if (isOllama()) {
-        if (variantId.isEmpty() || m_pullJob)
+        if (variantId.isEmpty())
             return;
-        m_panel->setBusy(true, -1);
+        if (m_pullVariants.contains(variantId)) {
+            // Same variant again: the running/queued job already covers it.
+            m_panel->setStatus(T("search.pullQueued").arg(variantId));
+            return;
+        }
+        const bool hasOwn = m_pullJob || !m_queuedPulls.isEmpty();
+        // Sample before creating the job: after that, our own pull counts too.
+        const bool otherPulling = m_cli->isPulling();
+        if (!hasOwn) {
+            // Registry pulls are queueable: the list stays usable, so the next
+            // click adds a job instead of being swallowed by a locked tab.
+            m_panel->setBusy(true, -1, true, /*queueable=*/true);
+        }
         // Another tab may be pulling: ours waits in the CLI queue instead of
         // killing that download (B-2).
-        m_panel->setStatus(m_cli->isPulling() ? T("search.pullQueued").arg(variantId)
-                                              : T("search.pulling").arg(variantId));
+        m_panel->setStatus(hasOwn || otherPulling ? T("search.pullQueued").arg(variantId)
+                                                  : T("search.pulling").arg(variantId));
         // The tag size from the registry is the intended download total; the
         // parser uses it so the bar does not restart for every layer. Both the
         // registry figure and the CLI lines use decimal units.
         OllamaJob *job = m_install->pullFromRegistry(
                 variantId, pullprogress::parseSizeBytes(m_panel->selectedVariantSizeText()));
-        m_pullJob = job;
-        connect(job, &OllamaJob::progress, this, &DiscoverPanel::onPullProgress);
-        connect(job, &OllamaJob::finished, this, [this, variantId](bool ok, const QString &output) {
-            onPullFinished(variantId, ok, output);
+        m_pullVariants.insert(variantId);
+        if (!hasOwn) {
+            m_pullJob = job;
+            m_pullItemId = itemId;
+            m_pullVariantId = variantId;
+            m_panel->setVariantJobState(itemId, variantId,
+                                        otherPulling ? ModelBrowserPanel::JobState::Queued
+                                                     : ModelBrowserPanel::JobState::Running);
+        } else {
+            m_queuedPulls.append(QueuedPull{job, itemId, variantId});
+            m_panel->setVariantJobState(itemId, variantId, ModelBrowserPanel::JobState::Queued);
+        }
+        connect(job, &OllamaJob::progress, this,
+                [this, job](const QString &label, int percent, qint64 received, qint64 total) {
+            // Queued jobs start only after the running one exits; until then
+            // their progress would fight over the single bar.
+            if (job != m_pullJob)
+                return;
+            // Ours may have waited behind another tab's pull: it runs now.
+            m_panel->setVariantJobState(m_pullItemId, m_pullVariantId,
+                                        ModelBrowserPanel::JobState::Running);
+            onPullProgress(label, percent, received, total);
+        });
+        connect(job, &OllamaJob::finished, this, [this, job, itemId, variantId](bool ok, const QString &output) {
+            onPullFinished(job, itemId, variantId, ok, output);
         });
         return;
     }
@@ -526,6 +594,23 @@ void DiscoverPanel::onAction(const QString &itemId, const QString &variantId)
 
 void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &variant)
 {
+    // One HuggingFace import at a time: a second variant waits in this panel's
+    // queue instead of replacing the running download.
+    if (m_queueActive || m_createJob) {
+        m_hfQueue.append(HfPending{repo, m_pendingItemId, variant});
+        m_panel->setVariantJobState(m_pendingItemId, variant.id,
+                                    ModelBrowserPanel::JobState::Queued);
+        m_panel->setStatus(T("search.pullQueued").arg(
+                variant.label.isEmpty() ? variant.id : variant.label));
+        notifyHfActivity();
+        return;
+    }
+    m_activeHfItemId = m_pendingItemId;
+    m_activeHfVariantId = variant.id;
+    m_activeHfVariant = variant;
+    m_panel->setVariantJobState(m_activeHfItemId, m_activeHfVariantId,
+                                ModelBrowserPanel::JobState::Running);
+
     m_pendingRepo = repo;
     m_pendingFile = variant.id;
     m_queueFirstFile = variant.id;
@@ -557,9 +642,14 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
     // Every shard from the same commit, and provenance records exactly that
     // commit (empty when the repo info has not arrived: `main`, as before).
     m_queueRevision = m_repoShas.value(repo);
+    // Keep enough metadata next to the partial files to offer "Продолжить"
+    // after a crash or a lost network, not just while the app runs.
+    writeHfSidecar(QDir(defaultDownloadDir()).filePath(
+            QFileInfo(variant.id).fileName() + QStringLiteral(".omm.json")), repo, variant);
     m_queueActive = true;
     m_cancelRequested = false;
-    m_panel->setBusy(true, -1);
+    m_panel->setBusy(true, -1, true, /*queueable=*/true);
+    notifyHfActivity();
     startNextPart();
 }
 
@@ -596,7 +686,7 @@ void DiscoverPanel::startNextPart()
     const int total = m_queueFiles.size();
     const int percent = m_queueTotalBytes > 0
             ? int(m_queueDoneBytes * 100 / m_queueTotalBytes) : -1;
-    m_panel->setBusy(true, qBound(-1, percent, 100));
+    m_panel->setBusy(true, qBound(-1, percent, 100), true, /*queueable=*/true);
     m_queuePartTotal = 0;
     if (total > 1) {
         m_panel->setStatus(T("browser.partProgress")
@@ -639,6 +729,28 @@ void DiscoverPanel::finishHfDownload()
         const QString projectorFrom = QDir(dir).filePath(splitWildcardPattern(projector));
         content += ModelfileBuilder::fromLine(projectorFrom);
     }
+    // Sampling hints: GGUF may carry llama.cpp's recommended values under
+    // `general.sampling.*`; otherwise use Ollama's own defaults, so clients
+    // that cannot pass `options` still get sane numbers instead of zeros.
+    double samplingTemp = 0.80;
+    double samplingTopP = 0.90;
+    int samplingTopK = 40;
+    const QString firstFile = QDir(dir).filePath(QFileInfo(m_queueFirstFile).fileName());
+    const GgufMeta gguf = GgufMeta::read(firstFile);
+    if (gguf.ok) {
+        if (gguf.samplingTemperature > 0)
+            samplingTemp = gguf.samplingTemperature;
+        if (gguf.samplingTopP > 0)
+            samplingTopP = gguf.samplingTopP;
+        if (gguf.samplingTopK > 0)
+            samplingTopK = gguf.samplingTopK;
+    }
+    content += QStringLiteral("PARAMETER temperature ")
+            + QString::number(samplingTemp, 'f', 2) + QLatin1Char('\n');
+    content += QStringLiteral("PARAMETER top_p ")
+            + QString::number(samplingTopP, 'f', 2) + QLatin1Char('\n');
+    content += QStringLiteral("PARAMETER top_k ")
+            + QString::number(samplingTopK) + QLatin1Char('\n');
     InstallService::HfImport request;
     request.name = name;
     request.modelfile = content;
@@ -650,16 +762,23 @@ void DiscoverPanel::finishHfDownload()
     for (const QString &file : std::as_const(m_queueFiles))
         request.sources << QDir(dir).filePath(QFileInfo(file).fileName());
     stopHfQueue();
+    QFile::remove(QDir(defaultDownloadDir()).filePath(
+            QFileInfo(m_queueFirstFile).fileName() + QStringLiteral(".omm.json")));
 
     // The GGUF is on disk, but Ollama cannot use it until `ollama create`
     // imports it (a 100 GB split takes minutes). Keep the "on device" mark off
     // until our job finishes — an editor update finishing first is not ours.
     // `ollama create` on a 100 GB model takes minutes: show a running bar and
     // lock the picker, but hide "Cancel" — the import cannot be interrupted.
-    m_panel->setBusy(true, -1, false);
+    // The create step cannot be cancelled, but the list stays usable so more
+    // imports can be queued behind it.
+    m_panel->setBusy(true, -1, false, /*queueable=*/true);
     m_panel->setStatus(T("browser.creating").arg(name));
     OllamaJob *job = m_install->importHf(request);
     m_createJob = job;
+    // The download part ended, but the model is not usable until create
+    // finishes: keep the global counter at one for this import.
+    notifyHfActivity();
     connect(job, &OllamaJob::finished, this, [this, job, name](bool ok, const QString &output) {
         onCreateFinished(name, ok, output,
                          job->property(InstallService::kFreedBytes).toULongLong());
@@ -803,12 +922,55 @@ bool DiscoverPanel::hfVariantInstalled(const QString &repo, const QString &first
     return false;
 }
 
+void DiscoverPanel::onCancelVariant(const QString &itemId, const QString &variantId)
+{
+    Q_UNUSED(itemId);
+    if (!isOllama()) {
+        cancelHfTask(variantId);
+        return;
+    }
+    // The action button doubles as "Отмена" for this variant: cancel exactly
+    // the job behind it, not the whole queue.
+    if (m_pullJob && m_pullVariantId == variantId) {
+        m_pullJob->cancel();
+        return;
+    }
+    for (int i = 0; i < m_queuedPulls.size(); ++i) {
+        if (m_queuedPulls.at(i).variantId != variantId)
+            continue;
+        const QueuedPull entry = m_queuedPulls.takeAt(i);
+        m_pullVariants.remove(entry.variantId);
+        m_panel->setVariantJobState(entry.itemId, entry.variantId,
+                                    ModelBrowserPanel::JobState::None);
+        if (entry.job)
+            entry.job->cancel();
+        if (!m_pullJob && m_queuedPulls.isEmpty())
+            m_panel->setBusy(false, 0);
+        return;
+    }
+}
+
 void DiscoverPanel::onCancel()
 {
     if (isOllama()) {
-        // Only our own pull: the editor's download is not this tab's to stop.
-        if (m_pullJob)
+        // Only our own pulls: the editor's download is not this tab's to stop.
+        // Clear the waiting ones first, so a promoted job cannot slip out of
+        // the queue while the running one reports its cancellation.
+        const auto queued = m_queuedPulls;
+        m_queuedPulls.clear();
+        for (const QueuedPull &entry : queued) {
+            m_pullVariants.remove(entry.variantId);
+            m_panel->setVariantJobState(entry.itemId, entry.variantId,
+                                        ModelBrowserPanel::JobState::None);
+            if (entry.job)
+                entry.job->cancel();
+        }
+        if (m_pullJob) {
+            m_pullVariants.remove(m_pullVariantId);
+            m_panel->setVariantJobState(m_pullItemId, m_pullVariantId,
+                                        ModelBrowserPanel::JobState::None);
             m_pullJob->cancel();
+        }
     } else {
         if (m_queueActive) {
             // Abort the part in flight; the queue stops when the reply reports
@@ -822,26 +984,77 @@ void DiscoverPanel::onCancel()
 void DiscoverPanel::onPullProgress(const QString &label, int percent,
                                    qint64 received, qint64 total)
 {
-    m_panel->setBusy(true, percent < 0 ? -1 : percent);
+    // Keep the tab queueable: this fires on every progress tick of a pull, and
+    // dropping the flag here would re-lock the list after the first update.
+    m_panel->setBusy(true, percent < 0 ? -1 : percent, true, /*queueable=*/true);
+    QString status;
     if (total > 0) {
-        m_panel->setStatus(T("browser.progress")
-                           .arg(humanSize(received), humanSize(total)));
+        status = T("browser.progress").arg(humanSize(received), humanSize(total));
     } else if (received > 0) {
-        m_panel->setStatus(T("browser.progressNoTotal").arg(humanSize(received)));
+        status = T("browser.progressNoTotal").arg(humanSize(received));
     } else if (!label.isEmpty()) {
         // Nothing counted yet: show what the CLI is doing ("pulling manifest").
-        m_panel->setStatus(label);
+        status = label;
     }
+    if (!m_queuedPulls.isEmpty()) {
+        // The progress line is rewritten on every tick, so the queue count must
+        // live inside it — otherwise a queued click has no lasting feedback.
+        if (!status.isEmpty())
+            status += QStringLiteral(" · ");
+        status += T("search.queuedCount").arg(m_queuedPulls.size());
+    }
+    if (!status.isEmpty())
+        m_panel->setStatus(status);
 }
 
-void DiscoverPanel::onPullFinished(const QString &pulled, bool ok, const QString &output)
+void DiscoverPanel::onPullFinished(OllamaJob *job, const QString &itemId, const QString &pulled,
+                                   bool ok, const QString &output)
 {
     // Called for this panel's own job only; InstallService has already
     // recorded the provenance.
+    m_pullVariants.remove(pulled);
+    m_panel->setVariantJobState(itemId, pulled, ModelBrowserPanel::JobState::None);
+    if (job != m_pullJob) {
+        // A suspended pull that finished later (it was promoted by the CLI on
+        // its own turn): drop it from our waiting list, but keep its result.
+        for (int i = 0; i < m_queuedPulls.size(); ++i) {
+            if (m_queuedPulls.at(i).job == job) {
+                m_queuedPulls.removeAt(i);
+                break;
+            }
+        }
+        if (ok) {
+            m_installedNames.insert(pulled);
+            m_panel->setVariantState(itemId, pulled, true, false);
+            emit installedChanged();
+        }
+        return;
+    }
+
     m_pullJob.clear();
-    m_panel->setBusy(false, 0);
+    m_pullItemId.clear();
+    m_pullVariantId.clear();
+    // Promote this tab's next queued pull; OllamaCli starts it as soon as the
+    // previous `ollama pull` exits.
+    while (!m_queuedPulls.isEmpty() && !m_queuedPulls.first().job)
+        m_queuedPulls.removeFirst();
+    if (!m_queuedPulls.isEmpty()) {
+        const QueuedPull next = m_queuedPulls.takeFirst();
+        m_pullJob = next.job;
+        m_pullItemId = next.itemId;
+        m_pullVariantId = next.variantId;
+        m_panel->setVariantJobState(next.itemId, next.variantId,
+                                    ModelBrowserPanel::JobState::Running);
+        m_panel->setBusy(true, -1, true, /*queueable=*/true);
+    } else {
+        m_panel->setBusy(false, 0);
+    }
+
     if (!ok) {
-        m_panel->setStatus(T("search.installFailed").arg(output));
+        if (output.compare(QLatin1String("cancelled"), Qt::CaseInsensitive) == 0)
+            m_panel->setStatus(T("search.cancelled"));
+        else
+            m_panel->setStatus(T("search.installFailed").arg(output));
         return;
     }
 
@@ -850,7 +1063,7 @@ void DiscoverPanel::onPullFinished(const QString &pulled, bool ok, const QString
     // The pull just fetched the manifest the registry serves now, so the
     // variant flips to "скачано" (and an "обновить" mark disappears) without
     // reloading the tab.
-    m_panel->setVariantState(m_pendingItemId, pulled, true, false);
+    m_panel->setVariantState(itemId, pulled, true, false);
     emit installedChanged();
 }
 
@@ -862,6 +1075,7 @@ void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString
     m_panel->setBusy(false, 0);
     if (!ok) {
         m_panel->setStatus(T("browser.createFailed").arg(output));
+        advanceHfQueue();
         return;
     }
     // The full list follows via installedChanged → refresh → modelsListed.
@@ -872,7 +1086,9 @@ void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString
             ? T("browser.installedCleaned").arg(name, humanSize(qint64(freed)))
             : T("search.installed").arg(name));
     emit installedChanged();
+    advanceHfQueue();
 }
+
 
 void DiscoverPanel::onDownloadProgress(qint64 received, qint64 total)
 {
@@ -886,7 +1102,9 @@ void DiscoverPanel::onDownloadProgress(qint64 received, qint64 total)
                                                  : m_queueDoneBytes + m_queuePartTotal;
     const int percent = planned > 0
             ? qBound(0, int(receivedTotal * 100 / planned), 100) : -1;
-    m_panel->setBusy(true, percent);
+    // Keep the tab queueable: this fires on every progress tick, and dropping
+    // the flag here would re-lock the repo list mid-download.
+    m_panel->setBusy(true, percent, true, /*queueable=*/true);
 
     QString status = planned > 0
             ? T("browser.progress").arg(humanSize(receivedTotal), humanSize(planned))
@@ -914,6 +1132,9 @@ void DiscoverPanel::onDownloadFinished(bool ok, const QString &path, const QStri
         const int parts = m_queueFiles.size();
         // Keep the shards that already finished: a retry only has to fetch the
         // remaining parts, and the finished files are what the Modelfile needs.
+        // A user cancel, however, means "I do not want this model": drop them.
+        if (cancelled)
+            removeHfPartialSources();
         stopHfQueue();
         if (cancelled)
             m_panel->setStatus(T("browser.downloadCancelled"));
@@ -922,6 +1143,7 @@ void DiscoverPanel::onDownloadFinished(bool ok, const QString &path, const QStri
                                .arg(part).arg(parts).arg(hfErrorText(error)));
         else
             m_panel->setStatus(T("browser.downloadFailed").arg(hfErrorText(error)));
+        advanceHfQueue();
         return;
     }
 
@@ -932,8 +1154,10 @@ void DiscoverPanel::onDownloadFinished(bool ok, const QString &path, const QStri
     m_queuePartTotal = 0;
 
     if (m_cancelRequested) {
+        removeHfPartialSources();
         stopHfQueue();
         m_panel->setStatus(T("browser.downloadCancelled"));
+        advanceHfQueue();
         return;
     }
     startNextPart();
@@ -1078,6 +1302,8 @@ QString DiscoverPanel::statusText() const
                        .arg(m_panel ? m_panel->itemCount() : 0);
     if (m_pullJob)
         text += QStringLiteral(" pull=running");
+    if (!m_queuedPulls.isEmpty())
+        text += QStringLiteral(" pull=queued:%1").arg(m_queuedPulls.size());
     if (m_createJob)
         text += QStringLiteral(" create=%1").arg(m_createJob->name());
     if (m_queueActive)
@@ -1090,4 +1316,340 @@ QString DiscoverPanel::statusText() const
 void DiscoverPanel::startInstall()
 {
     onAction(m_panel->selectedItemId(), m_panel->selectedVariantId());
+}
+
+QString DiscoverPanel::selectedVariantText() const
+{
+    return m_panel->selectedVariantText();
+}
+
+void DiscoverPanel::cancelSelectedVariant()
+{
+    onCancelVariant(m_panel->selectedItemId(), m_panel->selectedVariantId());
+}
+
+QString DiscoverPanel::hfActivityText() const
+{
+    if (isOllama())
+        return QString();
+    QString text;
+    if (m_queueActive && m_queueIndex < m_queueFiles.size())
+        text = QFileInfo(m_queueFiles.at(m_queueIndex)).fileName();
+    else if (m_createJob)
+        text = m_createJob->name();
+    else if (!m_hfQueue.isEmpty())
+        text = m_hfQueue.first().variant.label;
+    if (!m_hfQueue.isEmpty() && (m_queueActive || m_createJob))
+        text += T("downloads.plusQueued").arg(m_hfQueue.size());
+    return text;
+}
+
+bool DiscoverPanel::hfCancellable() const
+{
+    // `ollama create` cannot be interrupted; the download part can.
+    return !isOllama() && m_queueActive && !m_createJob;
+}
+
+QList<DiscoverPanel::HfTaskInfo> DiscoverPanel::hfTasks() const
+{
+    QList<HfTaskInfo> tasks;
+    if (isOllama())
+        return tasks;
+    if (m_queueActive || m_createJob) {
+        HfTaskInfo task;
+        task.id = m_activeHfVariantId;
+        if (m_queueActive && m_queueIndex < m_queueFiles.size())
+            task.label = QFileInfo(m_queueFiles.at(m_queueIndex)).fileName();
+        else if (m_createJob)
+            task.label = m_createJob->name();
+        task.active = true;
+        task.creating = m_createJob != nullptr;
+        task.cancellable = m_queueActive && !m_createJob;
+        tasks.append(task);
+    }
+    for (const HfPending &pending : m_hfQueue) {
+        HfTaskInfo task;
+        task.id = pending.variant.id;
+        task.label = pending.variant.label.isEmpty() ? pending.variant.id
+                                                     : pending.variant.label;
+        task.cancellable = true;
+        tasks.append(task);
+    }
+    return tasks;
+}
+
+QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
+{
+    QList<HfIncomplete> out;
+    if (isOllama())
+        return out;
+    const QDir dir(defaultDownloadDir());
+    const QStringList names = dir.entryList({QStringLiteral("*.omm.json")}, QDir::Files);
+    for (const QString &name : names) {
+        QFile file(dir.filePath(name));
+        if (!file.open(QIODevice::ReadOnly))
+            continue;
+        const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
+        const QString id = object.value(QStringLiteral("id")).toString();
+        if (id.isEmpty() || id == m_activeHfVariantId)
+            continue;
+        bool queued = false;
+        for (const HfPending &pending : m_hfQueue)
+            if (pending.variant.id == id)
+                queued = true;
+        if (queued)
+            continue;
+
+        HfIncomplete item;
+        item.sidecar = file.fileName();
+        item.total = qint64(object.value(QStringLiteral("total")).toDouble());
+        item.label = object.value(QStringLiteral("label")).toString();
+        const QJsonArray files = object.value(QStringLiteral("files")).toArray();
+        if (item.label.isEmpty() && !files.isEmpty())
+            item.label = QFileInfo(files.first().toString()).fileName();
+        for (const QJsonValue &value : files) {
+            const QString base = dir.filePath(QFileInfo(value.toString()).fileName());
+            const QFileInfo whole(base);
+            if (whole.exists()) {
+                item.downloaded += whole.size();
+                continue;
+            }
+            const QFileInfo part(base + QStringLiteral(".part"));
+            if (part.exists())
+                item.downloaded += part.size();
+        }
+        out.append(item);
+    }
+
+    // Partials left by older versions have no sidecar: list them too, so the
+    // space is visible and can be reclaimed (no resume metadata for them).
+    const QStringList parts = dir.entryList({QStringLiteral("*.part")}, QDir::Files);
+    for (const QString &name : parts) {
+        const QString base = name.left(name.size() - 5);  // strip ".part"
+        if (dir.exists(base + QStringLiteral(".omm.json")))
+            continue;
+        bool covered = false;
+        for (const HfIncomplete &known : std::as_const(out)) {
+            if (known.label == base) {
+                covered = true;
+                break;
+            }
+        }
+        if (covered)
+            continue;
+        HfIncomplete item;
+        item.sidecar.clear();
+        item.label = base;
+        item.downloaded = QFileInfo(dir.filePath(name)).size();
+        out.append(item);
+    }
+    return out;
+}
+
+bool DiscoverPanel::resumeHfIncomplete(const QString &sidecar)
+{
+    QFile file(sidecar);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
+    HfVariant variant;
+    variant.id = object.value(QStringLiteral("id")).toString();
+    variant.label = object.value(QStringLiteral("label")).toString();
+    variant.size = qint64(object.value(QStringLiteral("total")).toDouble());
+    const QJsonArray files = object.value(QStringLiteral("files")).toArray();
+    const QJsonArray sizes = object.value(QStringLiteral("sizes")).toArray();
+    for (int i = 0; i < files.size(); ++i) {
+        variant.files.append(files.at(i).toString());
+        variant.sizes.append(qint64(sizes.at(i).toDouble()));
+    }
+    if (variant.id.isEmpty() || variant.files.isEmpty())
+        return false;
+    m_pendingItemId = object.value(QStringLiteral("itemId")).toString();
+    startHfDownload(object.value(QStringLiteral("repo")).toString(), variant);
+    return true;
+}
+
+QString DiscoverPanel::downloadsDir() const
+{
+    return defaultDownloadDir();
+}
+
+bool DiscoverPanel::removeHfPartial(const QString &partPath)
+{
+    if (!partPath.endsWith(QLatin1String(".part")))
+        return false;
+    const bool removed = QFile::remove(partPath);
+    QFile::remove(partPath + QStringLiteral(".rev"));
+    return removed;
+}
+
+bool DiscoverPanel::removeHfIncomplete(const QString &sidecar)
+{
+    QFile file(sidecar);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
+    const QString dir = defaultDownloadDir();
+    for (const QJsonValue &value : object.value(QStringLiteral("files")).toArray()) {
+        const QString base = QDir(dir).filePath(QFileInfo(value.toString()).fileName());
+        QFile::remove(base);
+        QFile::remove(base + QStringLiteral(".part"));
+        QFile::remove(base + QStringLiteral(".part.rev"));
+    }
+    file.close();
+    QFile::remove(sidecar);
+    return true;
+}
+
+bool DiscoverPanel::moveHfTaskBefore(const QString &draggedId, const QString &targetId)
+{
+    int from = -1;
+    int to = -1;
+    for (int i = 0; i < m_hfQueue.size(); ++i) {
+        if (m_hfQueue.at(i).variant.id == draggedId)
+            from = i;
+        if (m_hfQueue.at(i).variant.id == targetId)
+            to = i;
+    }
+    if (from < 0 || to < 0 || from == to)
+        return false;
+    if (from < to)
+        --to;
+    m_hfQueue.move(from, to);
+    notifyHfActivity();
+    return true;
+}
+
+bool DiscoverPanel::prioritizeHfTask(const QString &id)
+{
+    int index = -1;
+    for (int i = 0; i < m_hfQueue.size(); ++i) {
+        if (m_hfQueue.at(i).variant.id == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return false;
+
+    const HfPending target = m_hfQueue.takeAt(index);
+    if (m_queueActive && !m_createJob) {
+        // Stop the running download and put it right behind the promoted one;
+        // partial shards stay, so the demoted import resumes from its range.
+        HfPending current;
+        current.repo = m_pendingRepo;
+        current.itemId = m_activeHfItemId;
+        current.variant = m_activeHfVariant;
+        m_hfQueue.prepend(current);
+        m_hfQueue.prepend(target);
+        m_panel->setVariantJobState(current.itemId, current.variant.id,
+                                    ModelBrowserPanel::JobState::Queued);
+        m_panel->setVariantJobState(target.itemId, target.variant.id,
+                                    ModelBrowserPanel::JobState::Queued);
+        // advanceHfQueue() must not clear the demoted task's badge.
+        m_activeHfVariantId.clear();
+        m_activeHfItemId.clear();
+        onCancel();
+        return true;
+    }
+
+    // Nothing to preempt (create step or idle): it will start next.
+    m_hfQueue.prepend(target);
+    notifyHfActivity();
+    if (!m_queueActive && !m_createJob)
+        advanceHfQueue();
+    return true;
+}
+
+bool DiscoverPanel::cancelHfTask(const QString &id)
+{
+    if (isOllama())
+        return false;
+    if (id == m_activeHfVariantId) {
+        if (m_queueActive && !m_createJob) {
+            onCancel();
+            return true;
+        }
+        return false;
+    }
+    for (int i = 0; i < m_hfQueue.size(); ++i) {
+        if (m_hfQueue.at(i).variant.id != id)
+            continue;
+        const HfPending removed = m_hfQueue.takeAt(i);
+        m_panel->setVariantJobState(removed.itemId, removed.variant.id,
+                                    ModelBrowserPanel::JobState::None);
+        notifyHfActivity();
+        if (!m_queueActive && !m_createJob)
+            m_panel->setBusy(false, 0);
+        return true;
+    }
+    return false;
+}
+
+void DiscoverPanel::notifyHfActivity()
+{
+    if (isOllama())
+        return;
+    emit hfActivityChanged((m_queueActive || m_createJob ? 1 : 0) + m_hfQueue.size());
+}
+
+void DiscoverPanel::writeHfSidecar(const QString &path, const QString &repo,
+                                  const HfVariant &variant) const
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("repo"), repo);
+    object.insert(QStringLiteral("itemId"), m_pendingItemId);
+    object.insert(QStringLiteral("id"), variant.id);
+    object.insert(QStringLiteral("label"), variant.label);
+    object.insert(QStringLiteral("total"), double(variant.size));
+    QJsonArray files;
+    QJsonArray sizes;
+    for (int i = 0; i < variant.files.size(); ++i) {
+        files.append(variant.files.at(i));
+        sizes.append(double(variant.sizes.value(i)));
+    }
+    object.insert(QStringLiteral("files"), files);
+    object.insert(QStringLiteral("sizes"), sizes);
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(QJsonDocument(object).toJson(QJsonDocument::Compact));
+}
+
+void DiscoverPanel::removeHfPartialSources()
+{
+    const QString dir = defaultDownloadDir();
+    for (const QString &file : std::as_const(m_queueFiles)) {
+        const QString base = QDir(dir).filePath(QFileInfo(file).fileName());
+        QFile::remove(base);                 // finished shard of a split model
+        QFile::remove(base + QStringLiteral(".part"));
+        QFile::remove(base + QStringLiteral(".part.rev"));
+    }
+    if (!m_queueFirstFile.isEmpty()) {
+        QFile::remove(QDir(defaultDownloadDir()).filePath(
+                QFileInfo(m_queueFirstFile).fileName() + QStringLiteral(".omm.json")));
+    }
+}
+
+void DiscoverPanel::advanceHfQueue()
+{
+    if (!m_activeHfVariantId.isEmpty()) {
+        m_panel->setVariantJobState(m_activeHfItemId, m_activeHfVariantId,
+                                    ModelBrowserPanel::JobState::None);
+        m_activeHfVariantId.clear();
+        m_activeHfItemId.clear();
+    }
+    if (!m_hfQueue.isEmpty()) {
+        const HfPending next = m_hfQueue.takeFirst();
+        m_pendingItemId = next.itemId;
+        startHfDownload(next.repo, next.variant);
+        return;
+    }
+    m_panel->setBusy(false, 0);
+    notifyHfActivity();
+}
+
+void DiscoverPanel::cancelHfActivity()
+{
+    if (!isOllama())
+        onCancel();
 }

@@ -185,6 +185,75 @@ int main(int argc, char *argv[])
         }
     }
 
+    // "downloads": start one live pull, verify the status-bar counter and
+    // capture the browser-like downloads popup, then cancel the pull.
+    if (shotMode == QLatin1String("downloads")) {
+        QTextStream out(stdout);
+        auto *tabs = window.findChild<QTabWidget *>();
+        DiscoverPanel *discover = nullptr;
+        if (tabs) {
+            tabs->setCurrentIndex(1);
+            spin(500);
+            discover = qobject_cast<DiscoverPanel *>(tabs->currentWidget());
+        }
+        if (!discover) {
+            out << "no ollama panel\n";
+            return 1;
+        }
+        discover->searchAs(QStringLiteral("smollm2"));
+        QElapsedTimer wait;
+        wait.start();
+        while (discover->modelCount() == 0 && wait.elapsed() < 20000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(50);
+        }
+        if (discover->modelCount() > 0)
+            discover->selectModel(0);
+        wait.restart();
+        while (discover->tagCount() == 0 && wait.elapsed() < 20000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(50);
+        }
+        if (discover->tagCount() > 0)
+            discover->selectTag(0);
+        QCoreApplication::processEvents();
+        discover->startInstall();
+        wait.restart();
+        while (!discover->statusText().contains(QLatin1String("pull="))
+               && wait.elapsed() < 20000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(50);
+        }
+        spin(500);
+
+        auto *btn = window.findChild<QToolButton *>(QStringLiteral("pullIndicator"));
+        out << "indicator: visible=" << (btn && btn->isVisible())
+            << " text=\"" << (btn ? btn->text() : QString()) << "\""
+            << " size=" << (btn ? btn->size().width() : 0) << "x"
+            << (btn ? btn->size().height() : 0)
+            << " at=" << (btn ? btn->mapTo(&window, QPoint(0, 0)).x() : -1) << ","
+            << (btn ? btn->mapTo(&window, QPoint(0, 0)).y() : -1)
+            << " window=" << window.width() << "x" << window.height() << "\n";
+        if (btn)
+            btn->click();
+        spin(800);
+        QWidget *popup = nullptr;
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            if (w->objectName() == QLatin1String("downloadsDialog") && w->isVisible())
+                popup = w;
+        }
+        out << "popup: " << (popup ? "visible" : "missing") << "\n";
+        if (popup)
+            out << "popup save: "
+                << (popup->grab().save(path + QStringLiteral(".popup.png"))
+                            ? "ok" : "failed") << "\n";
+        out << "window save: " << (window.grab().save(path) ? "ok" : "failed") << "\n";
+        QMetaObject::invokeMethod(discover, "onCancel", Qt::DirectConnection);
+        spin(300);
+        out << "status after cancel: " << discover->statusText() << "\n";
+        return 0;
+    }
+
     if (auto *tabs = window.findChild<QTabWidget *>()) {
         if (tab >= 0 && tab < tabs->count())
             tabs->setCurrentIndex(tab);

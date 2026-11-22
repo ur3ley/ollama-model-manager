@@ -143,6 +143,103 @@ int main(int argc, char *argv[])
         return (savedOllama && savedHf) ? 0 : 1;
     }
 
+    if (argc > 3 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--queue")) {
+        // Live check of the download queue: start a pull, then start another
+        // one from the same panel and require it to be queued, not ignored.
+        const QString firstQuery = QString::fromLocal8Bit(argv[2]);
+        const QString secondQuery = QString::fromLocal8Bit(argv[3]);
+
+        int sigActive = -1;
+        int sigQueued = -1;
+        QObject::connect(&cli, &OllamaCli::pullActivityChanged, &app,
+                         [&](int active, int queued) {
+            sigActive = active;
+            sigQueued = queued;
+        });
+
+        DiscoverPanel panel(DiscoverPanel::Source::Ollama, &install);
+        panel.resize(1000, 700);
+        panel.show();
+
+        auto prepare = [&](const QString &query) {
+            panel.searchAs(query);
+            if (!waitFor([&] { return panel.modelCount() > 0; }, 40000))
+                return false;
+            panel.selectModel(0);
+            if (!waitFor([&] { return panel.tagCount() > 0; }, 40000))
+                return false;
+            panel.selectTag(0);
+            QCoreApplication::processEvents();
+            return true;
+        };
+
+        if (!prepare(firstQuery)) {
+            QTextStream(stdout) << "FAIL first search: " << panel.statusText() << "\n";
+            return 1;
+        }
+        panel.startInstall();
+        check(waitFor([&] { return panel.statusText().contains("pull=running"); }, 30000),
+              QStringLiteral("first pull is running"));
+
+        if (!prepare(secondQuery)) {
+            QTextStream(stdout) << "FAIL second search: " << panel.statusText() << "\n";
+            QMetaObject::invokeMethod(&panel, "onCancel", Qt::DirectConnection);
+            return 1;
+        }
+        panel.startInstall();
+        const bool queued = waitFor([&] {
+            return panel.statusText().contains("pull=queued:1");
+        }, 15000);
+        check(queued, QStringLiteral("second pull is queued, not swallowed"));
+        check(sigActive == 1 && sigQueued == 1,
+              QStringLiteral("activity signal reports 1 running + 1 queued"));
+        check(panel.selectedVariantText().contains(QLatin1String("queued")),
+              QStringLiteral("variant row shows the queued badge"));
+        const QList<OllamaCli::PullInfo> list = cli.pullList();
+        check(list.size() == 2 && list.at(0).active && !list.at(1).active,
+              QStringLiteral("pull list: first runs, second waits"));
+        QTextStream(stdout) << "status: " << panel.statusText() << "\n"
+                            << "variant: " << panel.selectedVariantText() << "\n";
+
+        // Promote the queued pull: the running one is suspended and requeued
+        // right behind it, and the promoted row starts downloading.
+        const quint64 queuedId = cli.pullList().at(1).id;
+        check(cli.prioritizePull(queuedId), QStringLiteral("prioritize a queued pull"));
+        check(waitFor([&] {
+                  const auto current = cli.pullList();
+                  return current.size() == 2 && current.at(0).id == queuedId
+                          && current.at(0).active;
+              }, 30000),
+              QStringLiteral("promoted pull runs, the previous one waits behind it"));
+        check(waitFor([&] {
+                  return panel.selectedVariantText().contains(QLatin1String("downloading"));
+              }, 20000),
+              QStringLiteral("variant badge switches to downloading"));
+
+        // Cancel the selected (now running) variant: only it stops, the
+        // suspended one is promoted by the CLI.
+        panel.cancelSelectedVariant();
+        check(waitFor([&] {
+                  return !panel.statusText().contains("pull=queued")
+                          && panel.statusText().contains("pull=running");
+              }, 20000),
+              QStringLiteral("cancel variant stops only its own pull"));
+        check(!panel.selectedVariantText().contains(QLatin1String("queued")),
+              QStringLiteral("variant row loses the queued badge"));
+        const QList<OllamaCli::PullInfo> left = cli.pullList();
+        check(left.size() == 1 && left.at(0).active,
+              QStringLiteral("only the running pull is left"));
+        check(cli.cancelPull(left.at(0).id), QStringLiteral("cancel by id"));
+        check(waitFor([&] { return cli.pullList().isEmpty(); }, 15000),
+              QStringLiteral("pull list is empty"));
+
+        QMetaObject::invokeMethod(&panel, "onCancel", Qt::DirectConnection);
+        check(waitFor([&] { return !panel.statusText().contains("pull="); }, 20000),
+              QStringLiteral("cancel cleared running and queued pulls"));
+        QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n" : "FAILURES\n");
+        return g_failures == 0 ? 0 : 1;
+    }
+
     {
         DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &install);
         DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &install);

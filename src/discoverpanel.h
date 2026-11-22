@@ -50,21 +50,58 @@ public:
     int tagCount() const;
     QString suggestedName() const;
     QString statusText() const;
+    QString selectedVariantText() const;
+    void cancelSelectedVariant();
     void startInstall();
+    /** HF import entry for the global downloads panel ("" when idle). */
+    QString hfActivityText() const;
+    bool hfCancellable() const;
+    void cancelHfActivity();
+    /** Rows for the global downloads panel (running first, then the queue). */
+    struct HfTaskInfo {
+        QString id;
+        QString label;
+        bool active = false;
+        bool cancellable = false;
+        bool creating = false;
+    };
+    QList<HfTaskInfo> hfTasks() const;
+    bool cancelHfTask(const QString &id);
+    /** Leftover partial imports (unexpected stop) for the downloads manager. */
+    struct HfIncomplete {
+        QString sidecar;
+        QString label;
+        qint64 downloaded = 0;
+        qint64 total = 0;
+    };
+    QList<HfIncomplete> hfIncomplete() const;
+    bool resumeHfIncomplete(const QString &sidecar);
+    bool removeHfIncomplete(const QString &sidecar);
+    /** Old leftover `.part` without metadata: delete-only cleanup. */
+    bool removeHfPartial(const QString &partPath);
+    /** Folder where HF imports are downloaded (for the cleanup rows). */
+    QString downloadsDir() const;
+    /** Drag-and-drop order for the HF queue; target active = start now. */
+    bool moveHfTaskBefore(const QString &draggedId, const QString &targetId);
+    bool prioritizeHfTask(const QString &id);
 
 signals:
     void installedChanged();
+    /** HuggingFace download/import activity: pending tasks (running + queued). */
+    void hfActivityChanged(int pending);
 
 private slots:
     void onSearch();
     void onItemSelected(const QString &itemId);
     void onAction(const QString &itemId, const QString &variantId);
     void onCancel();
+    void onCancelVariant(const QString &itemId, const QString &variantId);
     void onDownloadProgress(qint64 received, qint64 total);
     void onDownloadFinished(bool ok, const QString &path, const QString &error);
     void onPullProgress(const QString &label, int percent,
                         qint64 received, qint64 total);
-    void onPullFinished(const QString &name, bool ok, const QString &output);
+    void onPullFinished(OllamaJob *job, const QString &itemId, const QString &name,
+                        bool ok, const QString &output);
     void onCreateFinished(const QString &name, bool ok, const QString &output, quint64 freed);
 
 private:
@@ -75,6 +112,12 @@ private:
     /** 401 from the Hub: append the "use the Token… button" hint. */
     QString hfErrorText(const QString &error) const;
     void updateFilterButton();
+    void advanceHfQueue();
+    void notifyHfActivity();
+    /** Cancelled import: drop its unfinished shards instead of leaving them. */
+    void removeHfPartialSources();
+    void writeHfSidecar(const QString &sidecar, const QString &repo,
+                        const HfVariant &variant) const;
     /** Cache of `ollama list`, fed by whoever ran it (no CLI call here). */
     void applyInstalledList(const QList<OllamaCli::ModelInfo> &models);
     void applySort(QList<RegistryClient::Model> &models) const;
@@ -141,6 +184,28 @@ private:
     QString m_pendingFile;
     // This panel's own operations: results of other tabs never reach it.
     QPointer<OllamaJob> m_pullJob;
+    QString m_pullItemId;
+    QString m_pullVariantId;
+    // Further pulls from this tab wait in OllamaCli's queue; only the running
+    // one drives the progress bar, the rest show "в очереди" in the status.
+    struct QueuedPull {
+        QPointer<OllamaJob> job;
+        QString itemId;
+        QString variantId;
+    };
+    QList<QueuedPull> m_queuedPulls;
+    QSet<QString> m_pullVariants;  // variants already running/queued here
+
+    // HuggingFace imports queue behind the running one (download + create).
+    struct HfPending {
+        QString repo;
+        QString itemId;
+        HfVariant variant;
+    };
+    QList<HfPending> m_hfQueue;
+    QString m_activeHfItemId;
+    QString m_activeHfVariantId;
+    HfVariant m_activeHfVariant;  // enough to requeue a preempted import
     // Set while `ollama create` runs for a freshly downloaded GGUF: the model
     // is not "installed" until that job finishes successfully.
     QPointer<OllamaJob> m_createJob;

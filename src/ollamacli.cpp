@@ -1,5 +1,6 @@
 #include "ollamacli.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -131,6 +132,7 @@ void OllamaCli::finish(OllamaJob *job, bool success, const QString &output)
     emit job->finished(success, output);
     if (wasQueued)
         startNextPull();
+    notifyPullActivity();
     emit jobFinished(job);
 }
 
@@ -284,6 +286,138 @@ bool OllamaCli::isPulling() const
     return m_activePull || !m_pullQueue.isEmpty();
 }
 
+QStringList OllamaCli::stalePartialBlobs() const
+{
+    QStringList files;
+    const QString root = modelsDir();
+    if (root.isEmpty())
+        return files;
+    const QDir blobs(QDir(root).filePath(QStringLiteral("blobs")));
+    const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-3600);
+    const QFileInfoList entries = blobs.entryInfoList(QDir::Files);
+    for (const QFileInfo &entry : entries) {
+        // Only `sha256-<hex>-partial[-N]`; complete blobs and manifests never
+        // contain this marker, so installed models cannot be hit.
+        if (!entry.fileName().contains(QLatin1String("-partial")))
+            continue;
+        if (entry.lastModified() > cutoff)
+            continue;
+        files.append(entry.absoluteFilePath());
+    }
+    return files;
+}
+
+QList<OllamaCli::PullInfo> OllamaCli::pullList() const
+{
+    QList<PullInfo> out;
+    if (m_activePull)
+        out.append(PullInfo{m_activePull->id(), m_activePull->name(), true,
+                            m_activePull->m_lastPercent});
+    for (const QPointer<OllamaJob> &job : m_pullQueue) {
+        if (job)
+            out.append(PullInfo{job->id(), job->name(), false, -1});
+    }
+    return out;
+}
+
+bool OllamaCli::cancelPull(quint64 id)
+{
+    if (m_activePull && m_activePull->id() == id) {
+        cancelJob(m_activePull);
+        return true;
+    }
+    for (const QPointer<OllamaJob> &job : std::as_const(m_pullQueue)) {
+        if (job && job->id() == id) {
+            cancelJob(job);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool OllamaCli::movePull(quint64 id, int delta)
+{
+    if (delta == 0)
+        return false;
+    int index = -1;
+    for (int i = 0; i < m_pullQueue.size(); ++i) {
+        if (m_pullQueue.at(i) && m_pullQueue.at(i)->id() == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return false;
+    const int target = index + delta;
+    if (target < 0 || target >= m_pullQueue.size())
+        return false;
+    m_pullQueue.move(index, target);
+    notifyPullActivity();
+    return true;
+}
+
+bool OllamaCli::movePullBefore(quint64 draggedId, quint64 targetId)
+{
+    int from = -1;
+    int to = -1;
+    for (int i = 0; i < m_pullQueue.size(); ++i) {
+        if (!m_pullQueue.at(i))
+            continue;
+        if (m_pullQueue.at(i)->id() == draggedId)
+            from = i;
+        if (m_pullQueue.at(i)->id() == targetId)
+            to = i;
+    }
+    if (from < 0 || to < 0 || from == to)
+        return false;
+    if (from < to)
+        --to;
+    m_pullQueue.move(from, to);
+    notifyPullActivity();
+    return true;
+}
+
+bool OllamaCli::prioritizePull(quint64 id)
+{
+    int index = -1;
+    for (int i = 0; i < m_pullQueue.size(); ++i) {
+        if (m_pullQueue.at(i) && m_pullQueue.at(i)->id() == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return false;
+    m_pullQueue.move(index, 0);
+    if (!m_activePull) {
+        startNextPull();
+        notifyPullActivity();
+        return true;
+    }
+    OllamaJob *active = m_activePull;
+    if (active->m_process) {
+        // Stop the running `ollama pull`; its finished handler puts the job
+        // right behind the promoted one and starts the queue again.
+        active->m_requeue = true;
+        active->m_process->kill();
+        return true;
+    }
+    // Scheduled but not started yet: requeue it by hand.
+    if (m_activePull == active)
+        m_activePull = nullptr;
+    active->m_state = OllamaJob::State::Queued;
+    m_pullQueue.insert(1, active);
+    emit pullSuspended(active->id());
+    notifyPullActivity();
+    startNextPull();
+    return true;
+}
+
+void OllamaCli::notifyPullActivity()
+{
+    emit pullActivityChanged(m_activePull ? 1 : 0, m_pullQueue.size());
+}
+
 OllamaJob *OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
 {
     OllamaJob *job = newJob(OllamaJob::Kind::Pull, name);
@@ -294,6 +428,8 @@ OllamaJob *OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
     if (isValidModelName(name) && !m_ollamaPath.isEmpty())
         m_pullQueue.append(job);
     schedule(job, {name}, [this]() { startNextPull(); });
+    if (m_pullQueue.contains(job))
+        notifyPullActivity();
     return job;
 }
 
@@ -314,6 +450,8 @@ void OllamaCli::startPull(OllamaJob *job)
 {
     m_activePull = job;
     job->m_state = OllamaJob::State::Running;
+    emit pullStarted(job->id());
+    notifyPullActivity();
     job->m_pullParser.reset();
     job->m_pullParser.setExpectedBytes(job->m_expectedBytes);
 
@@ -333,6 +471,25 @@ void OllamaCli::startPull(OllamaJob *job)
         }
         job->m_process = nullptr;
         process->deleteLater();
+        if (job->m_requeue) {
+            // Deliberately stopped by prioritizePull(): back to the queue right
+            // behind the promoted pull, no finished() and no failure state.
+            job->m_requeue = false;
+            job->m_cancelled = false;
+            job->m_state = OllamaJob::State::Queued;
+            job->m_pullParser.reset();
+            job->m_pullBuffer.clear();
+            job->m_lastPercent = -2;
+            job->m_lastLabel.clear();
+            job->m_lastReceived = -1;
+            if (m_activePull == job)
+                m_activePull = nullptr;
+            m_pullQueue.insert(qMin(1, m_pullQueue.size()), job);
+            emit pullSuspended(job->id());
+            notifyPullActivity();
+            startNextPull();
+            return;
+        }
         const bool ok = exitCode == 0 && status == QProcess::NormalExit && !job->m_cancelled;
         if (ok) {
             // Ollama redraws over the last frames, so the biggest layer may end

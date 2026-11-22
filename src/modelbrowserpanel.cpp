@@ -340,8 +340,14 @@ ModelBrowserPanel::ModelBrowserPanel(const QString &placeholder, QWidget *parent
     });
     connect(m_actionBtn, &QPushButton::clicked, this, [this]() {
         const QString variant = selectedVariantId();
-        if (!m_selectedId.isEmpty() && !variant.isEmpty())
-            emit actionRequested(m_selectedId, variant);
+        if (m_selectedId.isEmpty() || variant.isEmpty())
+            return;
+        const QString key = m_selectedId + QLatin1Char('\n') + variant;
+        if (m_jobStates.value(key, JobState::None) != JobState::None) {
+            emit cancelVariantRequested(m_selectedId, variant);
+            return;
+        }
+        emit actionRequested(m_selectedId, variant);
     });
     connect(m_cancelBtn, &QPushButton::clicked, this, &ModelBrowserPanel::cancelRequested);
     connect(theme::Theme::instance(), &theme::Theme::changed, this, [this]() {
@@ -495,6 +501,11 @@ QString ModelBrowserPanel::selectedVariantSizeText() const
     return QString();
 }
 
+QString ModelBrowserPanel::selectedVariantText() const
+{
+    return m_variantCombo->currentText();
+}
+
 const BrowserItem *ModelBrowserPanel::itemById(const QString &id) const
 {
     for (const BrowserItem &item : m_items) {
@@ -535,6 +546,40 @@ void ModelBrowserPanel::setVariantsError(const QString &itemId, const QString &e
         updateDetail();
         m_statusLabel->setText(error);
     }
+}
+
+void ModelBrowserPanel::setVariantJobState(const QString &itemId, const QString &variantId,
+                                           JobState state)
+{
+    if (itemId.isEmpty() || variantId.isEmpty())
+        return;
+    const QString key = itemId + QLatin1Char('\n') + variantId;
+    const JobState previous = m_jobStates.value(key, JobState::None);
+    if (previous == state)
+        return;
+    if (state == JobState::None)
+        m_jobStates.remove(key);
+    else
+        m_jobStates.insert(key, state);
+    if (itemId == m_selectedId) {
+        // Refresh the row's label in place ("в очереди" / "скачивается") and
+        // keep the user's selection.
+        for (int row = 0; row < m_variantCombo->count(); ++row) {
+            if (m_variantCombo->itemData(row, Qt::UserRole + 1).toString() != variantId)
+                continue;
+            if (const BrowserItem *item = itemById(itemId)) {
+                for (const BrowserVariant &candidate : item->variants) {
+                    if (candidate.id == variantId) {
+                        updateVariantRow(row, candidate);
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    if (itemId == m_selectedId && variantId == selectedVariantId())
+        updateActionState();
 }
 
 void ModelBrowserPanel::setVariantState(const QString &itemId, const QString &variantId,
@@ -655,6 +700,20 @@ QString ModelBrowserPanel::variantLabel(const BrowserVariant &variant) const
         label += QStringLiteral("  ·  ") + T("browser.updateMark");
     else if (variant.installed)
         label += QStringLiteral("  ·  ") + T("browser.installedMark");
+
+    // Live download state: same row as the variant, so a queued click is
+    // visible even when another download keeps rewriting the status line.
+    const QString key = m_selectedId + QLatin1Char('\n') + variant.id;
+    switch (m_jobStates.value(key, JobState::None)) {
+    case JobState::Queued:
+        label += QStringLiteral("  ·  ") + T("browser.queuedMark");
+        break;
+    case JobState::Running:
+        label += QStringLiteral("  ·  ") + T("browser.runningMark");
+        break;
+    case JobState::None:
+        break;
+    }
 
     if (variant.fit == memoryinfo::Fit::No)
         label += QStringLiteral("  ·  ") + T("browser.noFit");
@@ -794,7 +853,9 @@ void ModelBrowserPanel::applyAboutStyle()
 
 void ModelBrowserPanel::requestCurrentVariant()
 {
-    if (m_selectedId.isEmpty() || m_busy)
+    // A queueable download must not stop variant lookups: the user needs to
+    // browse other repos to add more downloads to the queue.
+    if (m_selectedId.isEmpty() || (m_busy && !m_queueable))
         return;
     const QString variantId = selectedVariantId();
     if (variantId.isEmpty())
@@ -818,7 +879,7 @@ void ModelBrowserPanel::updateDetail()
     m_badgesRow->setVisible(hasItem);
     m_statsLabel->setVisible(hasItem);
     m_descriptionLabel->setVisible(hasItem);
-    m_variantCombo->setEnabled(hasItem && !m_busy);
+    m_variantCombo->setEnabled(hasItem && (!m_busy || m_queueable));
     m_variantSize->setVisible(hasItem);
 
     if (!hasItem) {
@@ -884,7 +945,7 @@ void ModelBrowserPanel::updateDetail()
         }
     }
     applyVariantColors();
-    m_variantCombo->setEnabled(!m_busy && !item->variants.isEmpty());
+    m_variantCombo->setEnabled((!m_busy || m_queueable) && !item->variants.isEmpty());
     m_variantCombo->blockSignals(false);
 
     if (!item->variantsLoaded) {
@@ -951,6 +1012,22 @@ void ModelBrowserPanel::updateActionState()
             break;
         }
     }
+    // A download of this very variant overrides the installed-state text: the
+    // same button turns into "Отмена", so a queued or running variant can be
+    // cancelled at any moment.
+    if (variant) {
+        const QString key = m_selectedId + QLatin1Char('\n') + selectedVariantId();
+        switch (m_jobStates.value(key, JobState::None)) {
+        case JobState::Running:
+        case JobState::Queued:
+            text = T("browser.cancel");
+            usable = true;
+            accent = false;
+            break;
+        case JobState::None:
+            break;
+        }
+    }
 
     if (m_actionBtn->property("accent").toBool() != accent) {
         m_actionBtn->setProperty("accent", accent);
@@ -960,15 +1037,22 @@ void ModelBrowserPanel::updateActionState()
         m_actionBtn->style()->polish(m_actionBtn);
     }
     m_actionBtn->setText(text);
-    m_actionBtn->setEnabled(!m_busy && usable);
-    m_actionBtn->setVisible(!m_busy);
-    m_cancelBtn->setVisible(m_busy && m_busyCancellable);
+    // While a download runs, "Скачать" gives way to "Отмена" — except for a
+    // queueable pull, where both stay visible: cancel stops the running one,
+    // the action adds another variant to the queue.
+    const bool canStart = !m_busy || m_queueable;
+    m_actionBtn->setEnabled(canStart && usable);
+    m_actionBtn->setVisible(canStart);
+    // For queueable pulls the action button itself turns into "Отмена", so a
+    // second cancel button would only be ambiguous.
+    m_cancelBtn->setVisible(m_busy && m_busyCancellable && !m_queueable);
 }
 
-void ModelBrowserPanel::setBusy(bool busy, int percent, bool cancellable)
+void ModelBrowserPanel::setBusy(bool busy, int percent, bool cancellable, bool queueable)
 {
     m_busy = busy;
     m_busyCancellable = cancellable;
+    m_queueable = busy && queueable;
     m_progress->setVisible(busy);
     if (busy) {
         if (percent < 0) {
@@ -983,8 +1067,11 @@ void ModelBrowserPanel::setBusy(bool busy, int percent, bool cancellable)
         m_progress->setRange(0, 100);
         m_progress->setValue(0);
     }
-    m_list->setEnabled(!busy);
-    m_variantCombo->setEnabled(!busy && itemById(m_selectedId) != nullptr);
+    // A queued pull must not lock the tab: the user picks another model and
+    // its download waits in the CLI queue. Other busy states (HF import) keep
+    // the old lock, they have no queue to add to.
+    m_list->setEnabled(!busy || m_queueable);
+    m_variantCombo->setEnabled((!busy || m_queueable) && itemById(m_selectedId) != nullptr);
     updateActionState();
 }
 

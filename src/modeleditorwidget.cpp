@@ -830,7 +830,7 @@ void ModelEditorWidget::setCreateMode()
     m_numCtxSpin->setValue(32);
 
     m_tempCheck->setChecked(false);
-    m_tempSpin->setValue(0.70);
+    m_tempSpin->setValue(0.80);
     m_topPCheck->setChecked(false);
     m_topPSpin->setValue(0.90);
     m_topKCheck->setChecked(false);
@@ -978,17 +978,19 @@ void ModelEditorWidget::applyLoadedModel(const QString &modelName,
         tokens::setRole(m_numCtxSpin, wantK > maxK ? "danger" : "");
     }
 
+    // Absent parameters use Ollama's own defaults; show those instead of the
+    // spin box's zero, so an unchecked field never looks like "0.0".
     m_tempCheck->setChecked(params.parameters.contains("temperature"));
-    if (params.parameters.contains("temperature"))
-        m_tempSpin->setValue(params.parameters.value("temperature").toDouble());
+    m_tempSpin->setValue(params.parameters.contains("temperature")
+            ? params.parameters.value("temperature").toDouble() : 0.80);
 
     m_topPCheck->setChecked(params.parameters.contains("top_p"));
-    if (params.parameters.contains("top_p"))
-        m_topPSpin->setValue(params.parameters.value("top_p").toDouble());
+    m_topPSpin->setValue(params.parameters.contains("top_p")
+            ? params.parameters.value("top_p").toDouble() : 0.90);
 
     m_topKCheck->setChecked(params.parameters.contains("top_k"));
-    if (params.parameters.contains("top_k"))
-        m_topKSpin->setValue(params.parameters.value("top_k").toInt());
+    m_topKSpin->setValue(params.parameters.contains("top_k")
+            ? params.parameters.value("top_k").toInt() : 40);
 
     m_repeatPenaltyCheck->setChecked(params.parameters.contains("repeat_penalty"));
     if (params.parameters.contains("repeat_penalty"))

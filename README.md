@@ -33,6 +33,9 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
   - custom `SYSTEM` prompt (kept verbatim: blank lines and indentation survive an update)
   - other quants of the same repository in the FROM picker — install a missing one in place.
 - **Create / Update models** — generate a `Modelfile` and run `ollama create` for you; preview it first.
+  GGUF imports read llama.cpp's `general.sampling.*` recommendations; when absent, Ollama's own
+  defaults (`temperature 0.80`, `top_p 0.90`, `top_k 40`) are written into the Modelfile, so
+  clients that cannot pass `options` still get sane numbers.
 - **Rename** (via `ollama cp` + `rm`) and **delete**, with awareness of shared weight blobs (warns before deleting the last reference).
 - **Ollama tab** — search ollama.com, pick a tag (size and "fits in memory" hint), `ollama pull`
   with an aggregate progress bar; installed tags and available updates are marked.
@@ -40,6 +43,17 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
   merged, vision projectors are downloaded alongside), resumable downloads pinned to one commit,
   `ollama create` straight from the downloaded files, which are deleted afterwards. Gated repos
   work with a HuggingFace token kept in KDE Wallet (**Tools → HuggingFace token…**).
+- **Download queue and manager** — Ollama pulls and HuggingFace imports each have their own
+  counter in the tab-bar corner (`O ↓ N`, `H ↓ N`): neutral at zero, accent while busy. A click
+  opens a browser-like list: the running task on top, the queue below, per-row **Cancel**, and
+  drag-and-drop priority (drop onto the running row to start it now; the previous one is requeued
+  behind it and resumes from completed blobs/shards). Ollama pulls run strictly one at a time;
+  the HuggingFace import has its own queue and may run in parallel with an Ollama pull.
+- **Interrupted downloads** — cancelling a HuggingFace import removes its partial shards; an
+  unexpected stop keeps them and lists the model under **Incomplete** with size and percent,
+  **Resume** and **Delete**. Ollama's stale `-partial` blobs (older than an hour, never complete
+  models or manifests) are cleaned from **Tools → Clean incomplete Ollama downloads…**, directly
+  when permissions allow, otherwise with a single `pkexec` prompt.
 - **Provenance** — the manager remembers where each model came from (`models.json`), so it can
   check for updates; **Tools → Find sources** restores the link for models installed elsewhere.
 - **Import GGUF** — turn a local `.gguf` file into an Ollama model.
@@ -124,7 +138,9 @@ sudo cmake --install build
 1. The *Installed* tab lists your models as cards. Select one to load its parameters into the editor.
 2. Adjust parameters. Use **Preview** to see the generated `Modelfile`.
 3. **Update** rebuilds the selected model in place; change the **Name** field and press **Create** to save a new variant instead.
-4. The *Ollama* and *HuggingFace* tabs (`Ctrl+D` switches between them) search and install new models.
+4. The *Ollama* and *HuggingFace* tabs (`Ctrl+D` switches between them) search and install new
+   models. Downloads are queued per source; the corner counters (`O ↓ N`, `H ↓ N`) open the queue
+   where items can be cancelled or reordered by dragging.
 5. **Import GGUF** (`Ctrl+I`) creates a model from a local `.gguf` file.
 
 Keyboard shortcuts: `Ctrl+N` new model · `Ctrl+I` import GGUF · `Ctrl+D` Ollama/HuggingFace tabs ·
