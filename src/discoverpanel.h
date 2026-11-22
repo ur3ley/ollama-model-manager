@@ -116,6 +116,12 @@ private:
     void notifyHfActivity();
     /** Cancelled import: drop its unfinished shards instead of leaving them. */
     void removeHfPartialSources();
+    QString hfQueuePath() const;
+    void saveHfQueue() const;
+    void loadHfQueue();
+    bool m_hfResumePending = false;
+    // Source files of the import currently in `ollama create`: never deletable.
+    QStringList m_hfActiveSources;
     void writeHfSidecar(const QString &sidecar, const QString &repo,
                         const HfVariant &variant) const;
     /** Cache of `ollama list`, fed by whoever ran it (no CLI call here). */
@@ -205,6 +211,10 @@ private:
     QList<HfPending> m_hfQueue;
     QString m_activeHfItemId;
     QString m_activeHfVariantId;
+    // Preemption by drag-and-drop: the expected cancellation of the running
+    // reply is ignored, the promoted task is started directly (no control flow
+    // through HfClient's finished() signal, which could re-enter the client).
+    bool m_hfIgnoreCancel = false;
     HfVariant m_activeHfVariant;  // enough to requeue a preempted import
     // Set while `ollama create` runs for a freshly downloaded GGUF: the model
     // is not "installed" until that job finishes successfully.

@@ -1,6 +1,11 @@
 #include "ollamacli.h"
 
+#include "apppaths.h"
+
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -416,6 +421,47 @@ bool OllamaCli::prioritizePull(quint64 id)
 void OllamaCli::notifyPullActivity()
 {
     emit pullActivityChanged(m_activePull ? 1 : 0, m_pullQueue.size());
+    savePullQueue();
+}
+
+void OllamaCli::savePullQueue() const
+{
+    QStringList names;
+    if (m_activePull)
+        names.append(m_activePull->name());
+    for (const QPointer<OllamaJob> &job : m_pullQueue) {
+        if (job)
+            names.append(job->name());
+    }
+    const QString path = QDir(apppaths::configDir()).filePath(
+            QStringLiteral("ollama-queue.json"));
+    if (names.isEmpty()) {
+        QFile::remove(path);
+        return;
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("names"), QJsonArray::fromStringList(names));
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+}
+
+void OllamaCli::resumeSavedQueue()
+{
+    if (m_queueResumed)
+        return;
+    m_queueResumed = true;
+    QFile file(QDir(apppaths::configDir()).filePath(QStringLiteral("ollama-queue.json")));
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    const QJsonArray names = QJsonDocument::fromJson(file.readAll())
+            .object().value(QStringLiteral("names")).toArray();
+    for (const QJsonValue &value : names) {
+        const QString name = value.toString();
+        if (!name.isEmpty())
+            pullModelAsync(name);
+    }
 }
 
 OllamaJob *OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)

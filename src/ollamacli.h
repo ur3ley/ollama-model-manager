@@ -183,6 +183,8 @@ public:
     bool movePull(quint64 id, int delta);
     /** `-partial` blob files older than an hour (safe to delete, no live pull). */
     QStringList stalePartialBlobs() const;
+    /** Restore the pull queue saved before the app closed (Ollama resumes bytes). */
+    void resumeSavedQueue();
     /** Insert a queued pull right before another queued pull. */
     bool movePullBefore(quint64 draggedId, quint64 targetId);
     /**
@@ -237,6 +239,8 @@ private:
     void finish(OllamaJob *job, bool success, const QString &output);
     /** One place to report the pull pipeline to the global download counter. */
     void notifyPullActivity();
+    void savePullQueue() const;
+    bool m_queueResumed = false;
 
     void startNextPull();
     void startPull(OllamaJob *job);

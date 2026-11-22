@@ -26,6 +26,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
+#include <QTimer>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -275,6 +276,13 @@ DiscoverPanel::DiscoverPanel(Source source, InstallService *install, QWidget *pa
     });
     connect(m_hf, &HfClient::downloadProgress, this, &DiscoverPanel::onDownloadProgress);
     connect(m_hf, &HfClient::downloadFinished, this, &DiscoverPanel::onDownloadFinished);
+
+    if (!isOllama()) {
+        loadHfQueue();
+        // The main window connects to hfActivityChanged after building the
+        // panels; report the restored queue once the event loop runs.
+        QTimer::singleShot(0, this, [this]() { notifyHfActivity(); });
+    }
 }
 
 void DiscoverPanel::setupUi()
@@ -339,6 +347,18 @@ void DiscoverPanel::activate()
     if (m_loaded)
         return;
     m_loaded = true;
+    if (isOllama())
+        m_cli->resumeSavedQueue();
+    if (!isOllama() && m_hfResumePending && !m_queueActive && !m_createJob) {
+        // The queue survived a restart: continue where it stopped.
+        m_hfResumePending = false;
+        if (!m_hfQueue.isEmpty()) {
+            const HfPending next = m_hfQueue.takeFirst();
+            m_pendingItemId = next.itemId;
+            saveHfQueue();
+            startHfDownload(next.repo, next.variant);
+        }
+    }
     onSearch();
 }
 
@@ -602,6 +622,7 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
                                     ModelBrowserPanel::JobState::Queued);
         m_panel->setStatus(T("search.pullQueued").arg(
                 variant.label.isEmpty() ? variant.id : variant.label));
+        saveHfQueue();
         notifyHfActivity();
         return;
     }
@@ -649,6 +670,7 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
     m_queueActive = true;
     m_cancelRequested = false;
     m_panel->setBusy(true, -1, true, /*queueable=*/true);
+    saveHfQueue();
     notifyHfActivity();
     startNextPart();
 }
@@ -709,6 +731,7 @@ void DiscoverPanel::stopHfQueue()
     m_queueFiles.clear();
     m_queueSizes.clear();
     m_panel->setBusy(false, 0);
+    saveHfQueue();
 }
 
 void DiscoverPanel::finishHfDownload()
@@ -772,6 +795,7 @@ void DiscoverPanel::finishHfDownload()
     // lock the picker, but hide "Cancel" — the import cannot be interrupted.
     // The create step cannot be cancelled, but the list stays usable so more
     // imports can be queued behind it.
+    m_hfActiveSources = request.sources;
     m_panel->setBusy(true, -1, false, /*queueable=*/true);
     m_panel->setStatus(T("browser.creating").arg(name));
     OllamaJob *job = m_install->importHf(request);
@@ -1072,6 +1096,7 @@ void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString
 {
     // Our own import job; provenance and source cleanup are done already.
     m_createJob.clear();
+    m_hfActiveSources.clear();
     m_panel->setBusy(false, 0);
     if (!ok) {
         m_panel->setStatus(T("browser.createFailed").arg(output));
@@ -1119,6 +1144,12 @@ void DiscoverPanel::onDownloadProgress(qint64 received, qint64 total)
 
 void DiscoverPanel::onDownloadFinished(bool ok, const QString &path, const QString &error)
 {
+    if (m_hfIgnoreCancel && error == QLatin1String("cancelled")) {
+        // The stop we requested for a drag-and-drop promotion; the next task
+        // was already started synchronously.
+        m_hfIgnoreCancel = false;
+        return;
+    }
     if (!m_queueActive) {
         // A stale reply from a download that was replaced by this queue.
         m_panel->setBusy(false, 0);
@@ -1378,12 +1409,84 @@ QList<DiscoverPanel::HfTaskInfo> DiscoverPanel::hfTasks() const
     return tasks;
 }
 
+QString DiscoverPanel::hfQueuePath() const
+{
+    return QDir(apppaths::configDir()).filePath(QStringLiteral("hf-queue.json"));
+}
+
+void DiscoverPanel::saveHfQueue() const
+{
+    QJsonArray tasks;
+    auto append = [&tasks](const QString &repo, const QString &itemId, const HfVariant &variant) {
+        QJsonObject task;
+        task.insert(QStringLiteral("repo"), repo);
+        task.insert(QStringLiteral("itemId"), itemId);
+        task.insert(QStringLiteral("id"), variant.id);
+        task.insert(QStringLiteral("label"), variant.label);
+        task.insert(QStringLiteral("size"), double(variant.size));
+        QJsonArray files;
+        QJsonArray sizes;
+        for (int i = 0; i < variant.files.size(); ++i) {
+            files.append(variant.files.at(i));
+            sizes.append(double(variant.sizes.value(i)));
+        }
+        task.insert(QStringLiteral("files"), files);
+        task.insert(QStringLiteral("sizes"), sizes);
+        tasks.append(task);
+    };
+    if (m_queueActive && !m_activeHfVariant.id.isEmpty())
+        append(m_pendingRepo, m_activeHfItemId, m_activeHfVariant);
+    for (const HfPending &pending : std::as_const(m_hfQueue))
+        append(pending.repo, pending.itemId, pending.variant);
+
+    const QString path = hfQueuePath();
+    if (tasks.isEmpty()) {
+        QFile::remove(path);
+        return;
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("tasks"), tasks);
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+}
+
+void DiscoverPanel::loadHfQueue()
+{
+    QFile file(hfQueuePath());
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    const QJsonArray tasks = QJsonDocument::fromJson(file.readAll())
+            .object().value(QStringLiteral("tasks")).toArray();
+    for (const QJsonValue &value : tasks) {
+        const QJsonObject task = value.toObject();
+        HfPending pending;
+        pending.repo = task.value(QStringLiteral("repo")).toString();
+        pending.itemId = task.value(QStringLiteral("itemId")).toString();
+        pending.variant.id = task.value(QStringLiteral("id")).toString();
+        pending.variant.label = task.value(QStringLiteral("label")).toString();
+        pending.variant.size = qint64(task.value(QStringLiteral("size")).toDouble());
+        const QJsonArray files = task.value(QStringLiteral("files")).toArray();
+        const QJsonArray sizes = task.value(QStringLiteral("sizes")).toArray();
+        for (int i = 0; i < files.size(); ++i) {
+            pending.variant.files.append(files.at(i).toString());
+            pending.variant.sizes.append(qint64(sizes.at(i).toDouble()));
+        }
+        if (pending.variant.id.isEmpty())
+            continue;
+        m_hfQueue.append(pending);
+    }
+    m_hfResumePending = !m_hfQueue.isEmpty();
+}
+
 QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
 {
     QList<HfIncomplete> out;
     if (isOllama())
         return out;
     const QDir dir(defaultDownloadDir());
+    QSet<QString> coveredFiles;  // every file named by any sidecar
     const QStringList names = dir.entryList({QStringLiteral("*.omm.json")}, QDir::Files);
     for (const QString &name : names) {
         QFile file(dir.filePath(name));
@@ -1405,8 +1508,35 @@ QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
         item.total = qint64(object.value(QStringLiteral("total")).toDouble());
         item.label = object.value(QStringLiteral("label")).toString();
         const QJsonArray files = object.value(QStringLiteral("files")).toArray();
+        for (const QJsonValue &value : files)
+            coveredFiles.insert(QFileInfo(value.toString()).fileName());
         if (item.label.isEmpty() && !files.isEmpty())
             item.label = QFileInfo(files.first().toString()).fileName();
+
+        // A queued/suspended import must read "в очереди", never "Продолжить":
+        // match by id, first file name and visible label (old sidecars may
+        // carry a variant id that differs from what the queue holds).
+        QSet<QString> owned;
+        auto addOwned = [&owned](const HfVariant &variant) {
+            if (!variant.id.isEmpty()) {
+                owned.insert(variant.id);
+                owned.insert(QFileInfo(variant.id).fileName());
+            }
+            if (!variant.label.isEmpty())
+                owned.insert(variant.label);
+            for (const QString &source : variant.files)
+                owned.insert(QFileInfo(source).fileName());
+        };
+        addOwned(m_activeHfVariant);
+        for (const HfPending &pending : std::as_const(m_hfQueue))
+            addOwned(pending.variant);
+        if (owned.contains(id))
+            continue;
+        if (!files.isEmpty()) {
+            const QString first = QFileInfo(files.first().toString()).fileName();
+            if (owned.contains(first) || owned.contains(item.label))
+                continue;
+        }
         for (const QJsonValue &value : files) {
             const QString base = dir.filePath(QFileInfo(value.toString()).fileName());
             const QFileInfo whole(base);
@@ -1418,6 +1548,13 @@ QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
             if (part.exists())
                 item.downloaded += part.size();
         }
+        // Nothing downloaded → a queued task that never started; everything
+        // downloaded → the file is whole (the import may still be in create).
+        // Neither belongs in "Incomplete".
+        if (item.downloaded <= 0)
+            continue;
+        if (item.total > 0 && item.downloaded >= item.total)
+            continue;
         out.append(item);
     }
 
@@ -1426,7 +1563,17 @@ QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
     const QStringList parts = dir.entryList({QStringLiteral("*.part")}, QDir::Files);
     for (const QString &name : parts) {
         const QString base = name.left(name.size() - 5);  // strip ".part"
+        // Vision projectors are part of the variant's import (a second FROM
+        // line), never orphan fragments on their own.
+        if (base.contains(QLatin1String("mmproj"), Qt::CaseInsensitive)
+                || base.contains(QLatin1String("projector"), Qt::CaseInsensitive)) {
+            continue;
+        }
         if (dir.exists(base + QStringLiteral(".omm.json")))
+            continue;
+        // A projector/other shard of a variant whose sidecar is named after
+        // its first file: still part of that import, not an orphan.
+        if (coveredFiles.contains(base))
             continue;
         bool covered = false;
         for (const HfIncomplete &known : std::as_const(out)) {
@@ -1478,6 +1625,8 @@ bool DiscoverPanel::removeHfPartial(const QString &partPath)
 {
     if (!partPath.endsWith(QLatin1String(".part")))
         return false;
+    if (m_hfActiveSources.contains(partPath.left(partPath.size() - 5)))
+        return false;  // source of the running `ollama create`
     const bool removed = QFile::remove(partPath);
     QFile::remove(partPath + QStringLiteral(".rev"));
     return removed;
@@ -1492,6 +1641,8 @@ bool DiscoverPanel::removeHfIncomplete(const QString &sidecar)
     const QString dir = defaultDownloadDir();
     for (const QJsonValue &value : object.value(QStringLiteral("files")).toArray()) {
         const QString base = QDir(dir).filePath(QFileInfo(value.toString()).fileName());
+        if (m_hfActiveSources.contains(base))
+            continue;  // needed by the running `ollama create`
         QFile::remove(base);
         QFile::remove(base + QStringLiteral(".part"));
         QFile::remove(base + QStringLiteral(".part.rev"));
@@ -1516,6 +1667,7 @@ bool DiscoverPanel::moveHfTaskBefore(const QString &draggedId, const QString &ta
     if (from < to)
         --to;
     m_hfQueue.move(from, to);
+    saveHfQueue();
     notifyHfActivity();
     return true;
 }
@@ -1540,6 +1692,13 @@ bool DiscoverPanel::prioritizeHfTask(const QString &id)
         current.repo = m_pendingRepo;
         current.itemId = m_activeHfItemId;
         current.variant = m_activeHfVariant;
+        if (current.variant.id.isEmpty()) {
+            // Defensive: the running task may predate the cached variant.
+            current.variant.id = m_activeHfVariantId;
+            current.variant.files = m_queueFiles;
+            current.variant.sizes = m_queueSizes;
+            current.variant.size = m_queueTotalBytes;
+        }
         m_hfQueue.prepend(current);
         m_hfQueue.prepend(target);
         m_panel->setVariantJobState(current.itemId, current.variant.id,
@@ -1549,7 +1708,31 @@ bool DiscoverPanel::prioritizeHfTask(const QString &id)
         // advanceHfQueue() must not clear the demoted task's badge.
         m_activeHfVariantId.clear();
         m_activeHfItemId.clear();
-        onCancel();
+        // The .part stays for the later resume, but the "incomplete" sidecar
+        // must not: while queued the task is simply "waiting", and the sidecar
+        // is rewritten by startHfDownload when it runs again.
+        if (!current.variant.id.isEmpty()) {
+            QFile::remove(QDir(defaultDownloadDir()).filePath(
+                    QFileInfo(current.variant.id).fileName() + QStringLiteral(".omm.json")));
+        }
+        // Stop the running reply and ignore its "cancelled" signal: the next
+        // task is started right here, so the transition cannot interleave with
+        // another reorder.
+        m_hfIgnoreCancel = true;
+        m_cancelRequested = false;
+        m_hf->cancelDownload();
+        stopHfQueue();
+        for (int i = 0; i < m_hfQueue.size(); ++i) {
+            if (m_hfQueue.at(i).variant.id != target.variant.id)
+                continue;
+            const HfPending next = m_hfQueue.takeAt(i);
+            m_pendingItemId = next.itemId;
+            startHfDownload(next.repo, next.variant);
+            break;
+        }
+        QTimer::singleShot(5000, this, [this]() { m_hfIgnoreCancel = false; });
+        saveHfQueue();
+        notifyHfActivity();
         return true;
     }
 
@@ -1576,8 +1759,11 @@ bool DiscoverPanel::cancelHfTask(const QString &id)
         if (m_hfQueue.at(i).variant.id != id)
             continue;
         const HfPending removed = m_hfQueue.takeAt(i);
+        QFile::remove(QDir(defaultDownloadDir()).filePath(
+                QFileInfo(removed.variant.id).fileName() + QStringLiteral(".omm.json")));
         m_panel->setVariantJobState(removed.itemId, removed.variant.id,
                                     ModelBrowserPanel::JobState::None);
+        saveHfQueue();
         notifyHfActivity();
         if (!m_queueActive && !m_createJob)
             m_panel->setBusy(false, 0);

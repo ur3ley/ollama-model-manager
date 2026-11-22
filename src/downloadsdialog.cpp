@@ -143,25 +143,11 @@ void DownloadsDialog::rebuildPulls()
         status->setProperty("muted", true);
         status->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-        auto *up = new QToolButton(row);
-        up->setText(QStringLiteral("\u2191"));
-        up->setToolTip(T(QStringLiteral("downloads.moveUp")));
-        up->setVisible(!pull.active);
-        up->setEnabled(!pull.active && i > 1);
-
-        auto *down = new QToolButton(row);
-        down->setText(QStringLiteral("\u2193"));
-        down->setToolTip(T(QStringLiteral("downloads.moveDown")));
-        down->setVisible(!pull.active);
-        down->setEnabled(!pull.active && i < pulls.size() - 1);
-
         auto *cancel = new QToolButton(row);
         cancel->setText(T(QStringLiteral("downloads.cancel")));
 
         layout->addWidget(name, 1);
         layout->addWidget(status);
-        layout->addWidget(up);
-        layout->addWidget(down);
         layout->addWidget(cancel);
 
         const quint64 id = pull.id;
@@ -169,22 +155,10 @@ void DownloadsDialog::rebuildPulls()
             m_cli->cancelPull(id);
             refresh();
         });
-        connect(up, &QToolButton::clicked, this, [this, id]() {
-            m_cli->movePull(id, -1);
-            refresh();
-        });
-        connect(down, &QToolButton::clicked, this, [this, id]() {
-            m_cli->movePull(id, 1);
-            refresh();
-        });
-
-        m_rows.insert(id, PullRow{row, status, up, down});
+        m_rows.insert(id, PullRow{row, status, nullptr, nullptr});
         m_pullRows->addWidget(row);
 
-        row->setAcceptDrops(true);
-        row->setAttribute(Qt::WA_StyledBackground, true);
-        row->installEventFilter(this);
-        m_rowIds.insert(row, id);
+        // Static FIFO order: no drag-and-drop priority changes.
     }
 
     m_pullEmpty->setVisible(pulls.isEmpty());
@@ -217,7 +191,9 @@ void DownloadsDialog::rebuildHf()
 
         auto *cancel = new QToolButton(row);
         cancel->setText(T(QStringLiteral("downloads.cancel")));
-        cancel->setEnabled(task.cancellable);
+        // `ollama create` cannot be interrupted: hide the button instead of
+        // showing a disabled one.
+        cancel->setVisible(task.cancellable);
         const QString id = task.id;
         connect(cancel, &QToolButton::clicked, this, [this, id]() {
             m_hf->cancelHfTask(id);
@@ -230,9 +206,7 @@ void DownloadsDialog::rebuildHf()
         m_hfRows->addWidget(row);
         m_hfRowList.append(HfRow{row, task.id, status, cancel});
 
-        row->setAttribute(Qt::WA_StyledBackground, true);
-        row->installEventFilter(this);
-        m_hfRowIds.insert(row, task.id);
+        // Static FIFO order: no drag-and-drop priority changes.
     }
 
     m_hfEmpty->setVisible(tasks.isEmpty());
@@ -274,7 +248,11 @@ void DownloadsDialog::refresh()
                 auto *layout = new QHBoxLayout(row);
                 layout->setContentsMargins(0, 0, 0, 0);
                 layout->setSpacing(6);
-                auto *name = new QLabel(item.label, row);
+                auto *name = new QLabel(
+                        item.sidecar.isEmpty()
+                        ? item.label + QStringLiteral(" · ")
+                                  + T(QStringLiteral("downloads.oldFragment"))
+                        : item.label, row);
                 name->setAttribute(Qt::WA_TransparentForMouseEvents);
                 const int percent = item.total > 0
                         ? int(qBound<qint64>(qint64(0), item.downloaded * 100 / item.total,
@@ -330,10 +308,6 @@ void DownloadsDialog::refresh()
             if (row == m_rows.constEnd())
                 continue;
             row->status->setText(pullStatus(pull));
-            if (row->up)
-                row->up->setEnabled(!pull.active && i > 1);
-            if (row->down)
-                row->down->setEnabled(!pull.active && i < pulls.size() - 1);
         }
         m_pullEmpty->setVisible(pulls.isEmpty());
     }
