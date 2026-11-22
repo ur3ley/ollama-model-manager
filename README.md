@@ -1,5 +1,7 @@
 # Ollama Model Manager
 
+**English** | [Русский](README.ru.md)
+
 A lightweight desktop GUI for managing your local [Ollama](https://ollama.com) models — built with Qt 6 and C++17.
 
 Browse installed models, tweak their parameters (context size, sampling, penalties, system prompt), create new variants, import GGUF files, rename and delete — all without hand‑writing a single `Modelfile`.
