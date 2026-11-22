@@ -76,6 +76,15 @@ QString defaultDownloadDir()
     return apppaths::downloadDir();
 }
 
+// One folder per import under .staging, so partial files never mix between
+// models and can be removed as a unit.
+QString stagingDirFor(const QString &downloadDir, const QString &firstFile)
+{
+    QString base = QFileInfo(firstFile).fileName();
+    base.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._-]+")), QStringLiteral("_"));
+    return QDir(downloadDir).filePath(QStringLiteral(".staging/") + base);
+}
+
 // Bytes free on the filesystem that holds `dir`; 0 when it cannot be queried
 // (then the caller skips the check instead of blocking the download).
 quint64 freeDiskBytes(const QString &dir)
@@ -635,6 +644,8 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
     m_pendingRepo = repo;
     m_pendingFile = variant.id;
     m_queueFirstFile = variant.id;
+    m_hfDir = stagingDirFor(defaultDownloadDir(), variant.id);
+    QDir().mkpath(m_hfDir);
     m_queueFiles = variant.files;
     m_queueSizes = variant.sizes;
     while (m_queueSizes.size() < m_queueFiles.size())
@@ -665,8 +676,7 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
     m_queueRevision = m_repoShas.value(repo);
     // Keep enough metadata next to the partial files to offer "Продолжить"
     // after a crash or a lost network, not just while the app runs.
-    writeHfSidecar(QDir(defaultDownloadDir()).filePath(
-            QFileInfo(variant.id).fileName() + QStringLiteral(".omm.json")), repo, variant);
+    writeHfSidecar(QDir(m_hfDir).filePath(QStringLiteral(".omm.json")), repo, variant);
     m_queueActive = true;
     m_cancelRequested = false;
     m_panel->setBusy(true, -1, true, /*queueable=*/true);
@@ -691,7 +701,7 @@ void DiscoverPanel::startNextPart()
     // completed: a file with the expected size counts as done (an unfinished
     // shard stays a `.part`, which HfClient resumes with an HTTP range).
     while (m_queueIndex < m_queueFiles.size()) {
-        const QString localPath = QDir(defaultDownloadDir())
+        const QString localPath = QDir(m_hfDir)
                 .filePath(QFileInfo(m_queueFiles.at(m_queueIndex)).fileName());
         const qint64 expected = m_queueSizes.value(m_queueIndex);
         const QFileInfo info(localPath);
@@ -720,7 +730,7 @@ void DiscoverPanel::startNextPart()
     } else {
         m_panel->setStatus(T("browser.downloading").arg(m_queueFiles.at(m_queueIndex)));
     }
-    m_hf->download(m_pendingRepo, m_queueFiles.at(m_queueIndex), defaultDownloadDir(),
+    m_hf->download(m_pendingRepo, m_queueFiles.at(m_queueIndex), m_hfDir,
                    m_queueSizes.value(m_queueIndex), m_queueRevision);
 }
 
@@ -737,7 +747,7 @@ void DiscoverPanel::stopHfQueue()
 void DiscoverPanel::finishHfDownload()
 {
     const QString name = HfClient::modelNameFor(m_pendingRepo, m_queueFirstFile);
-    const QString dir = defaultDownloadDir();
+    const QString dir = m_hfDir;
     const bool split = m_queueMainCount > 1;
     // Always derive the main file from the first shard: the last downloaded
     // file may already be the projector.
@@ -785,8 +795,7 @@ void DiscoverPanel::finishHfDownload()
     for (const QString &file : std::as_const(m_queueFiles))
         request.sources << QDir(dir).filePath(QFileInfo(file).fileName());
     stopHfQueue();
-    QFile::remove(QDir(defaultDownloadDir()).filePath(
-            QFileInfo(m_queueFirstFile).fileName() + QStringLiteral(".omm.json")));
+    QFile::remove(QDir(m_hfDir).filePath(QStringLiteral(".omm.json")));
 
     // The GGUF is on disk, but Ollama cannot use it until `ollama create`
     // imports it (a 100 GB split takes minutes). Keep the "on device" mark off
@@ -1099,6 +1108,10 @@ void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString
     m_hfActiveSources.clear();
     m_panel->setBusy(false, 0);
     if (!ok) {
+        if (!m_hfDir.isEmpty()) {
+            QDir(m_hfDir).removeRecursively();
+            m_hfDir.clear();
+        }
         m_panel->setStatus(T("browser.createFailed").arg(output));
         advanceHfQueue();
         return;
@@ -1107,6 +1120,10 @@ void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString
     m_installedNames.insert(name);
     if (!m_pendingItemId.isEmpty())
         applyHfVariants(m_pendingItemId);
+    if (!m_hfDir.isEmpty()) {
+        QDir(m_hfDir).removeRecursively();
+        m_hfDir.clear();
+    }
     m_panel->setStatus(freed > 0
             ? T("browser.installedCleaned").arg(name, humanSize(qint64(freed)))
             : T("search.installed").arg(name));
@@ -1485,60 +1502,43 @@ QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
     QList<HfIncomplete> out;
     if (isOllama())
         return out;
-    const QDir dir(defaultDownloadDir());
-    QSet<QString> coveredFiles;  // every file named by any sidecar
-    const QStringList names = dir.entryList({QStringLiteral("*.omm.json")}, QDir::Files);
-    for (const QString &name : names) {
-        QFile file(dir.filePath(name));
+    const QDir root(defaultDownloadDir());
+
+    // Tasks currently active/queued must not be offered as "incomplete".
+    QSet<QString> owned;
+    auto addOwned = [&owned](const HfVariant &variant) {
+        if (!variant.id.isEmpty()) {
+            owned.insert(variant.id);
+            owned.insert(QFileInfo(variant.id).fileName());
+        }
+        if (!variant.label.isEmpty())
+            owned.insert(variant.label);
+        for (const QString &source : variant.files)
+            owned.insert(QFileInfo(source).fileName());
+    };
+    addOwned(m_activeHfVariant);
+    for (const HfPending &pending : std::as_const(m_hfQueue))
+        addOwned(pending.variant);
+
+    auto inspect = [&](const QString &sidecarPath, const QString &fileDir) {
+        QFile file(sidecarPath);
         if (!file.open(QIODevice::ReadOnly))
-            continue;
+            return;
         const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
         const QString id = object.value(QStringLiteral("id")).toString();
-        if (id.isEmpty() || id == m_activeHfVariantId)
-            continue;
-        bool queued = false;
-        for (const HfPending &pending : m_hfQueue)
-            if (pending.variant.id == id)
-                queued = true;
-        if (queued)
-            continue;
+        const QJsonArray files = object.value(QStringLiteral("files")).toArray();
+        QString label = object.value(QStringLiteral("label")).toString();
+        if (label.isEmpty() && !files.isEmpty())
+            label = QFileInfo(files.first().toString()).fileName();
+        if (id.isEmpty() || owned.contains(id) || owned.contains(label))
+            return;
 
         HfIncomplete item;
-        item.sidecar = file.fileName();
+        item.sidecar = sidecarPath;
         item.total = qint64(object.value(QStringLiteral("total")).toDouble());
-        item.label = object.value(QStringLiteral("label")).toString();
-        const QJsonArray files = object.value(QStringLiteral("files")).toArray();
-        for (const QJsonValue &value : files)
-            coveredFiles.insert(QFileInfo(value.toString()).fileName());
-        if (item.label.isEmpty() && !files.isEmpty())
-            item.label = QFileInfo(files.first().toString()).fileName();
-
-        // A queued/suspended import must read "в очереди", never "Продолжить":
-        // match by id, first file name and visible label (old sidecars may
-        // carry a variant id that differs from what the queue holds).
-        QSet<QString> owned;
-        auto addOwned = [&owned](const HfVariant &variant) {
-            if (!variant.id.isEmpty()) {
-                owned.insert(variant.id);
-                owned.insert(QFileInfo(variant.id).fileName());
-            }
-            if (!variant.label.isEmpty())
-                owned.insert(variant.label);
-            for (const QString &source : variant.files)
-                owned.insert(QFileInfo(source).fileName());
-        };
-        addOwned(m_activeHfVariant);
-        for (const HfPending &pending : std::as_const(m_hfQueue))
-            addOwned(pending.variant);
-        if (owned.contains(id))
-            continue;
-        if (!files.isEmpty()) {
-            const QString first = QFileInfo(files.first().toString()).fileName();
-            if (owned.contains(first) || owned.contains(item.label))
-                continue;
-        }
+        item.label = label;
         for (const QJsonValue &value : files) {
-            const QString base = dir.filePath(QFileInfo(value.toString()).fileName());
+            const QString base = QDir(fileDir).filePath(QFileInfo(value.toString()).fileName());
             const QFileInfo whole(base);
             if (whole.exists()) {
                 item.downloaded += whole.size();
@@ -1548,46 +1548,44 @@ QList<DiscoverPanel::HfIncomplete> DiscoverPanel::hfIncomplete() const
             if (part.exists())
                 item.downloaded += part.size();
         }
-        // Nothing downloaded → a queued task that never started; everything
-        // downloaded → the file is whole (the import may still be in create).
-        // Neither belongs in "Incomplete".
         if (item.downloaded <= 0)
-            continue;
+            return;
         if (item.total > 0 && item.downloaded >= item.total)
-            continue;
+            return;
         out.append(item);
-    }
+    };
 
-    // Partials left by older versions have no sidecar: list them too, so the
-    // space is visible and can be reclaimed (no resume metadata for them).
-    const QStringList parts = dir.entryList({QStringLiteral("*.part")}, QDir::Files);
+    // New layout: one staging folder per import.
+    const QDir staging(root.filePath(QStringLiteral(".staging")));
+    const QStringList dirs = staging.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &sub : dirs)
+        inspect(staging.filePath(sub + QStringLiteral("/.omm.json")),
+                staging.filePath(sub));
+
+    // Legacy flat sidecars from versions before staging folders.
+    const QStringList flat = root.entryList({QStringLiteral("*.omm.json")}, QDir::Files);
+    for (const QString &name : flat)
+        inspect(root.filePath(name), root.absolutePath());
+
+    // Orphan `.part` files with no metadata at all: delete-only cleanup.
+    const QStringList parts = root.entryList({QStringLiteral("*.part")}, QDir::Files);
     for (const QString &name : parts) {
-        const QString base = name.left(name.size() - 5);  // strip ".part"
-        // Vision projectors are part of the variant's import (a second FROM
-        // line), never orphan fragments on their own.
+        const QString base = name.left(name.size() - 5);
         if (base.contains(QLatin1String("mmproj"), Qt::CaseInsensitive)
                 || base.contains(QLatin1String("projector"), Qt::CaseInsensitive)) {
             continue;
         }
-        if (dir.exists(base + QStringLiteral(".omm.json")))
-            continue;
-        // A projector/other shard of a variant whose sidecar is named after
-        // its first file: still part of that import, not an orphan.
-        if (coveredFiles.contains(base))
+        if (root.exists(base + QStringLiteral(".omm.json")))
             continue;
         bool covered = false;
-        for (const HfIncomplete &known : std::as_const(out)) {
-            if (known.label == base) {
+        for (const HfIncomplete &known : std::as_const(out))
+            if (known.label == base)
                 covered = true;
-                break;
-            }
-        }
         if (covered)
             continue;
         HfIncomplete item;
-        item.sidecar.clear();
         item.label = base;
-        item.downloaded = QFileInfo(dir.filePath(name)).size();
+        item.downloaded = QFileInfo(root.filePath(name)).size();
         out.append(item);
     }
     return out;
@@ -1711,10 +1709,8 @@ bool DiscoverPanel::prioritizeHfTask(const QString &id)
         // The .part stays for the later resume, but the "incomplete" sidecar
         // must not: while queued the task is simply "waiting", and the sidecar
         // is rewritten by startHfDownload when it runs again.
-        if (!current.variant.id.isEmpty()) {
-            QFile::remove(QDir(defaultDownloadDir()).filePath(
-                    QFileInfo(current.variant.id).fileName() + QStringLiteral(".omm.json")));
-        }
+        if (!m_hfDir.isEmpty())
+            QFile::remove(QDir(m_hfDir).filePath(QStringLiteral(".omm.json")));
         // Stop the running reply and ignore its "cancelled" signal: the next
         // task is started right here, so the transition cannot interleave with
         // another reorder.
@@ -1803,17 +1799,9 @@ void DiscoverPanel::writeHfSidecar(const QString &path, const QString &repo,
 
 void DiscoverPanel::removeHfPartialSources()
 {
-    const QString dir = defaultDownloadDir();
-    for (const QString &file : std::as_const(m_queueFiles)) {
-        const QString base = QDir(dir).filePath(QFileInfo(file).fileName());
-        QFile::remove(base);                 // finished shard of a split model
-        QFile::remove(base + QStringLiteral(".part"));
-        QFile::remove(base + QStringLiteral(".part.rev"));
-    }
-    if (!m_queueFirstFile.isEmpty()) {
-        QFile::remove(QDir(defaultDownloadDir()).filePath(
-                QFileInfo(m_queueFirstFile).fileName() + QStringLiteral(".omm.json")));
-    }
+    // Staging folder holds nothing but this import's files.
+    if (!m_hfDir.isEmpty() && !m_createJob)
+        QDir(m_hfDir).removeRecursively();
 }
 
 void DiscoverPanel::advanceHfQueue()

@@ -122,6 +122,9 @@ private:
     bool m_hfResumePending = false;
     // Source files of the import currently in `ollama create`: never deletable.
     QStringList m_hfActiveSources;
+    // Per-import staging folder: all shards, projector and the sidecar live
+    // here, so the queue can treat one model as one folder.
+    QString m_hfDir;
     void writeHfSidecar(const QString &sidecar, const QString &repo,
                         const HfVariant &variant) const;
     /** Cache of `ollama list`, fed by whoever ran it (no CLI call here). */

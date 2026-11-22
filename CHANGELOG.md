@@ -11,6 +11,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   queue below, every row can be cancelled and queued pulls can be dragged onto the running row to
   start immediately (the previous pull is requeued and resumes from completed blobs). Ollama
   pulls stay strictly serialized; HuggingFace imports have their own queue.
+- **Per-import staging folder**: every HuggingFace import downloads into
+  `~/.local/share/ollama-manager/models/.staging/<file>/` (shards, projector, partials,
+  metadata). The queue and "Incomplete" treat it as one unit; it is removed after a successful
+  `ollama create`, on cancel and after a failed import, so completed models leave no stray files.
 - **Incomplete downloads**: cancelling an HF import deletes its partial shards, while an
   unexpected stop keeps them with size/percent, **Resume** and **Delete** in the HF popup.
   `Tools → Clean incomplete Ollama downloads…` removes `-partial` blobs older than an hour
