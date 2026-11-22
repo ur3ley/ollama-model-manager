@@ -34,6 +34,7 @@ private slots:
     void crashedCreateReportsOnce();
     void overlappingCreatesKeepTheirResults();
     void invalidNamesNeverReachTheCli();
+    void rejectedPullLeavesTheQueueFree();
     void missingBinaryFailsEveryJob();
     void showParsesVerbatimSystemAndRepeatedParameters();
     void supersededListIsSilent();
@@ -219,6 +220,37 @@ void OllamaJobsTest::invalidNamesNeverReachTheCli()
     QVERIFY(log().isEmpty());  // S-6: no process was started
 }
 
+void OllamaJobsTest::rejectedPullLeavesTheQueueFree()
+{
+    OllamaCli cli(nullptr, m_fake);
+    // A pull refused before it started used to stay in the queue, so isPulling()
+    // never went back to false and the panels said "queued" forever (review 3.1).
+    OllamaJob *bad = cli.pullModelAsync(QStringLiteral("-bad name"));
+    QSignalSpy badDone(bad, &OllamaJob::finished);
+    QTRY_COMPARE(badDone.count(), 1);
+    QVERIFY(!badDone.first().at(0).toBool());
+    QVERIFY(badDone.first().at(1).toString().contains(QStringLiteral("invalid model name")));
+    QVERIFY(!cli.isPulling());
+    QVERIFY(log().isEmpty());  // no process was started
+
+    // The queue is usable again: the next pull starts without a second reason.
+    OllamaJob *good = cli.pullModelAsync(QStringLiteral("fast"));
+    QSignalSpy goodDone(good, &OllamaJob::finished);
+    QTRY_VERIFY(good->state() == OllamaJob::State::Running);
+    QVERIFY(cli.isPulling());
+    QTRY_COMPARE(goodDone.count(), 1);
+    QVERIFY(goodDone.first().at(0).toBool());
+    QVERIFY(!cli.isPulling());
+
+    // Same net for a missing binary: the job never joins the queue either.
+    OllamaCli missing(nullptr, m_dir.filePath(QStringLiteral("no-such-ollama")));
+    OllamaJob *orphan = missing.pullModelAsync(QStringLiteral("fast"));
+    QSignalSpy orphanDone(orphan, &OllamaJob::finished);
+    QTRY_COMPARE(orphanDone.count(), 1);
+    QVERIFY(!orphanDone.first().at(0).toBool());
+    QVERIFY(!missing.isPulling());
+}
+
 void OllamaJobsTest::missingBinaryFailsEveryJob()
 {
     OllamaCli cli(nullptr, m_dir.filePath(QStringLiteral("no-such-ollama")));
@@ -384,6 +416,7 @@ void OllamaJobsTest::hfImportCleansUpOnlyOnSuccess()
     request.name = QStringLiteral("x-q8");
     OllamaJob *job = install.importHf(request);
     QVariant freed;
+    // Connected after importHf() returned: the value must not depend on that.
     connect(job, &OllamaJob::finished, this, [&freed, job] {
         freed = job->property(InstallService::kFreedBytes);
     });
@@ -402,7 +435,8 @@ void OllamaJobsTest::pullFromRegistryRecordsProvenance()
     Provenance store(m_dir.filePath(QStringLiteral("pull.json")));
     InstallService install(&cli, &store);
     OllamaJob *job = install.pullFromRegistry(QStringLiteral("fast"));
-    // The caller's slot already sees the record: the service connected first.
+    // The caller's slot already sees the record: the service's finish hook runs
+    // inside OllamaCli::finish(), not in a slot of its own.
     bool recordedBeforeCaller = false;
     connect(job, &OllamaJob::finished, this, [&] {
         recordedBeforeCaller = store.contains(QStringLiteral("fast"));

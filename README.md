@@ -53,7 +53,9 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
   through the proxy.
 - **Daemon & tray** — optionally runs in the background with a tray icon, proxying Ollama on the
   LAN while the GUI window stays hidden. The proxy runs in its own thread, so dialogs and wallet
-  prompts never stall remote clients.
+  prompts never stall remote clients. The window itself keeps repainting but does not accept
+  clicks while a wallet prompt (up to 5 minutes) or the RSA key generation runs: the wait is a
+  local event loop that excludes user input, not a frozen application.
 
 ---
 

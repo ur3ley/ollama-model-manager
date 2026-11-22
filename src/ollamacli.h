@@ -57,6 +57,17 @@ public:
     /** Pull: kill the download, or drop it from the queue. Other kinds run to the end. */
     void cancel();
 
+    /**
+     * Bookkeeping that must be done before anyone is told the job finished.
+     *
+     * InstallService records provenance and deletes the downloaded sources on
+     * success, and the caller's finished() slot reads that result (the freed
+     * bytes on the job, a record in models.json). A plain connect() would make
+     * the outcome depend on which side was connected first; the hook always
+     * runs inside OllamaCli::finish(), before finished() is emitted.
+     */
+    void setFinishHook(std::function<void(OllamaJob *job)> hook);
+
 signals:
     /** Pull only. percent is -1 while the total is unknown. */
     void progress(const QString &label, int percent, qint64 received, qint64 total);
@@ -97,6 +108,9 @@ private:
 
     // Create from content: the private Modelfile lives as long as the job (S-1).
     QTemporaryFile *m_modelfile = nullptr;
+
+    // Runs once in finish(), before finished(); set by the job's owner.
+    std::function<void(OllamaJob *)> m_finishHook;
 };
 
 class OllamaCli : public QObject

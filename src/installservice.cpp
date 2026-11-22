@@ -19,8 +19,8 @@ OllamaJob *InstallService::pullFromRegistry(const QString &name, qint64 expected
 {
     OllamaJob *job = m_cli->pullModelAsync(name, expectedBytes);
     Provenance *provenance = m_provenance;
-    connect(job, &OllamaJob::finished, this, [provenance, name](bool ok, const QString &) {
-        if (!ok)
+    job->setFinishHook([provenance, name](OllamaJob *finishedJob) {
+        if (!finishedJob->success())
             return;
         Provenance::Entry entry;
         entry.source = QStringLiteral("ollama");
@@ -34,9 +34,9 @@ OllamaJob *InstallService::importHf(const HfImport &request)
 {
     OllamaJob *job = m_cli->createModel(request.name, request.modelfile);
     Provenance *provenance = m_provenance;
-    connect(job, &OllamaJob::finished, this, [provenance, request, job](bool ok, const QString &) {
+    job->setFinishHook([provenance, request](OllamaJob *finishedJob) {
         // A failed create keeps the sources: a retry must not download them again.
-        if (!ok)
+        if (!finishedJob->success())
             return;
         Provenance::Entry entry;
         entry.source = QStringLiteral("hf");
@@ -49,7 +49,7 @@ OllamaJob *InstallService::importHf(const HfImport &request)
         provenance->record(request.name, entry);
         // Ollama has copied the shards into its blob store: the downloaded
         // sources are now a second full copy.
-        job->setProperty(kFreedBytes, qulonglong(removeSources(request.sources)));
+        finishedJob->setProperty(kFreedBytes, qulonglong(removeSources(request.sources)));
     });
     return job;
 }
@@ -66,8 +66,8 @@ OllamaJob *InstallService::deleteModel(const QString &name)
     const QStringList sources = sourceFiles(m_provenance->lookup(name), apppaths::downloadDir());
     OllamaJob *job = m_cli->deleteModelAsync(name);
     Provenance *provenance = m_provenance;
-    connect(job, &OllamaJob::finished, this, [provenance, name, sources](bool ok, const QString &) {
-        if (!ok)
+    job->setFinishHook([provenance, name, sources](OllamaJob *finishedJob) {
+        if (!finishedJob->success())
             return;
         // Otherwise the browser keeps claiming the quant is "downloaded".
         provenance->remove(name);
@@ -80,10 +80,11 @@ OllamaJob *InstallService::renameModel(const QString &oldName, const QString &ne
 {
     OllamaJob *job = m_cli->renameModelAsync(oldName, newName);
     Provenance *provenance = m_provenance;
-    connect(job, &OllamaJob::finished, this, [provenance, job, oldName, newName](bool ok, const QString &) {
+    job->setFinishHook([provenance, oldName, newName](OllamaJob *finishedJob) {
+        const bool ok = finishedJob->success();
         // The original ref is what ties the model to its repository: it moves
         // with the copy even when the old name could not be removed (B-5).
-        if (ok || job->partial())
+        if (ok || finishedJob->partial())
             provenance->rename(oldName, newName);
     });
     return job;

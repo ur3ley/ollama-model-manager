@@ -58,6 +58,8 @@ public:
      * start with `to` instead (the download directory moved). Returns the
      * number of rewritten fields. The current format stores repository file
      * names only; this keeps hand-edited or future absolute paths valid.
+     * All or nothing: when the file cannot be written, the in-memory copy is
+     * rolled back and -1 is returned (the disk still points at `from`).
      */
     int rebasePaths(const QString &from, const QString &to);
 
@@ -81,7 +83,8 @@ signals:
 private:
     Provenance();
     void load();
-    void save() const;
+    /** Writes the store; false when the file could not be written (rolled back by the caller). */
+    bool save() const;
 
     QString m_path;
     QJsonObject m_data;

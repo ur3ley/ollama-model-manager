@@ -42,8 +42,6 @@ QString humanSize(qint64 bytes)
     return format::byteSize(bytes, QStringLiteral("—"));
 }
 
-
-
 double parseCompactNumber(const QString &text)
 {
     if (text.isEmpty())
@@ -1073,7 +1071,20 @@ QString DiscoverPanel::suggestedName() const
 
 QString DiscoverPanel::statusText() const
 {
-    return QString();
+    // Diagnostic for the offscreen self-test's failure messages: what the panel
+    // actually holds, in one line (it used to be a stub that returned "").
+    QString text = QStringLiteral("source=%1 items=%2")
+                       .arg(isOllama() ? QStringLiteral("ollama") : QStringLiteral("hf"))
+                       .arg(m_panel ? m_panel->itemCount() : 0);
+    if (m_pullJob)
+        text += QStringLiteral(" pull=running");
+    if (m_createJob)
+        text += QStringLiteral(" create=%1").arg(m_createJob->name());
+    if (m_queueActive)
+        text += QStringLiteral(" download=%1/%2")
+                        .arg(m_queueIndex)
+                        .arg(m_queueFiles.size());
+    return text;
 }
 
 void DiscoverPanel::startInstall()

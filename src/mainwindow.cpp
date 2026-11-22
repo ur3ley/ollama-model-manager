@@ -491,11 +491,17 @@ void MainWindow::onNewModel()
 
 void MainWindow::onDeleteModel(const QString &modelName)
 {
+    // Two clicks on "delete" used to start two checks and stack two identical
+    // dialogs; the second answer then met a model that was already gone.
+    if (m_deleteChecks.contains(modelName))
+        return;
+    m_deleteChecks.insert(modelName);
     // Counting the models that share the blob takes `ollama list` plus one
     // `show --modelfile` per model: asynchronous, the window stays live (P-1).
     statusBar()->showMessage(T("delete.checking").arg(modelName));
     OllamaJob *usage = m_cli->blobUsageAsync(modelName);
     connect(usage, &OllamaJob::finished, this, [this, usage, modelName](bool, const QString &) {
+        m_deleteChecks.remove(modelName);
         statusBar()->clearMessage();
         // A failed check is not a reason to refuse: the dialog then speaks of
         // the last copy, the cautious wording.

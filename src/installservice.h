@@ -18,8 +18,9 @@ class OllamaJob;
  * and the leftover sources" and "rename → move the record" used to live in
  * the discover panels and the main window. Here they are one call each; the
  * returned OllamaJob is the caller's handle for progress and the result. The
- * bookkeeping is connected to the job before the caller gets it, so by the
- * time the caller's finished() slot runs, provenance and files are up to date.
+ * bookkeeping is a finish hook of the job (OllamaJob::setFinishHook), so it
+ * always runs before the caller's finished() slot — the order the connections
+ * were made in cannot change the result the caller reads.
  */
 class InstallService : public QObject
 {

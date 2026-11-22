@@ -25,6 +25,11 @@ void OllamaJob::cancel()
         m_cli->cancelJob(this);
 }
 
+void OllamaJob::setFinishHook(std::function<void(OllamaJob *)> hook)
+{
+    m_finishHook = std::move(hook);
+}
+
 // ---------------------------------------------------------------- OllamaCli
 
 OllamaCli::OllamaCli(QObject *parent, const QString &ollamaPath)
@@ -109,10 +114,24 @@ void OllamaCli::finish(OllamaJob *job, bool success, const QString &output)
     job->m_state = OllamaJob::State::Finished;
     job->m_success = success;
     job->m_output = output;
-    emit job->finished(success, output);
-    emit jobFinished(job);
-    // The temporary Modelfile goes with the job.
+    // The owner's bookkeeping (provenance, freed bytes) runs before the signals,
+    // so a consumer's slot sees the final result whatever the connect order was.
+    if (auto hook = std::move(job->m_finishHook)) {
+        job->m_finishHook = nullptr;
+        hook(job);
+    }
+    if (m_activePull == job)
+        m_activePull = nullptr;
+    // Whatever path led here, a pull that leaves the pipeline must hand its
+    // queue slot back — a rejected job would otherwise keep isPulling() true.
+    const bool wasQueued = job->m_kind == OllamaJob::Kind::Pull && m_pullQueue.removeAll(job) > 0;
+    // deleteLater() comes before the signals: a receiver of jobFinished() may
+    // destroy the whole cli, and then the job is gone with it.
     job->deleteLater();
+    emit job->finished(success, output);
+    if (wasQueued)
+        startNextPull();
+    emit jobFinished(job);
 }
 
 void OllamaCli::listModelsAsync()
@@ -269,7 +288,11 @@ OllamaJob *OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
 {
     OllamaJob *job = newJob(OllamaJob::Kind::Pull, name);
     job->m_expectedBytes = expectedBytes;
-    m_pullQueue.append(job);
+    // Join the queue only if the pull can actually run: schedule() refuses an
+    // invalid name or a missing binary without calling startNextPull(), and a
+    // stale entry would leave isPulling() true for good (review 2026-11-22, 3.1).
+    if (isValidModelName(name) && !m_ollamaPath.isEmpty())
+        m_pullQueue.append(job);
     schedule(job, {name}, [this]() { startNextPull(); });
     return job;
 }

@@ -29,8 +29,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   on the first start; see the README, "Where the files are".
 - `ollama` operations are separate jobs: a second pull waits instead of killing the first,
   results can no longer be taken by another tab, the delete dialog no longer freezes the window.
-- The proxy runs in its own thread; wallet prompts and certificate generation no longer block
-  the window.
+- The proxy runs in its own thread; wallet prompts and certificate generation no longer freeze
+  the event loop: the proxy keeps answering remote clients and the network keeps working while
+  they run. Precisely: the window keeps repainting, but waits for the wallet prompt (up to
+  5 minutes) and for the RSA key generation with user input excluded from the wait — clicks are
+  ignored until it returns.
 - Requires Qt 6.5 and CMake 3.21; the systemd unit installs to `share/ollama-model-manager/systemd`.
 
 ### Fixed

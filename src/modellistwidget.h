@@ -6,7 +6,6 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QToolButton>
-#include <QProcess>
 #include <QVBoxLayout>
 #include <QWidget>
 

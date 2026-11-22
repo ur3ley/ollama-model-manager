@@ -6,6 +6,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QActionGroup>
+#include <QSet>
 #include "ollamacli.h"
 #include "modellistwidget.h"
 #include "modeleditorwidget.h"
@@ -88,6 +89,8 @@ private:
     /** After binding, select the card that now contains this model name. */
     QString m_pendingSelectModel;
     bool m_refreshQueued = false;  // onRefreshAll() coalescing (P-3)
+    /** Models whose delete check is running: a second click must not stack a dialog. */
+    QSet<QString> m_deleteChecks;
     DiscoverPanel *m_hfPanel = nullptr;
     StartPageHeader *m_hero = nullptr;
     QSplitter *m_splitter;

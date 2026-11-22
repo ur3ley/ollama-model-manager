@@ -74,16 +74,18 @@ void Provenance::load()
         m_data = doc.object();
 }
 
-void Provenance::save() const
+bool Provenance::save() const
 {
     const QString &path = m_path;
     apppaths::ensurePrivateDir(QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
-        return;
+        return false;
     file.write(QJsonDocument(m_data).toJson(QJsonDocument::Indented));
-    if (file.commit())
-        apppaths::restrictFile(path);  // download history: owner only (S-8)
+    if (!file.commit())
+        return false;
+    apppaths::restrictFile(path);  // download history: owner only (S-8)
+    return true;
 }
 
 void Provenance::record(const QString &modelName, const Entry &entry)
@@ -160,6 +162,7 @@ int Provenance::rebasePaths(const QString &from, const QString &to)
     const QString target = QDir(to).absolutePath() + QLatin1Char('/');
     int rewritten = 0;
     QStringList touched;
+    const QJsonObject before = m_data;  // the file is still untouched until save()
     for (auto it = m_data.begin(); it != m_data.end(); ++it) {
         QJsonObject obj = it.value().toObject();
         bool dirty = false;
@@ -177,7 +180,12 @@ int Provenance::rebasePaths(const QString &from, const QString &to)
         }
     }
     if (rewritten > 0) {
-        save();
+        // All or nothing: models.json must never be left pointing at a half
+        // moved directory, so a failed write drops the rewrite from memory too.
+        if (!save()) {
+            m_data = before;
+            return -1;
+        }
         for (const QString &name : std::as_const(touched))
             emit changed(name);
     }

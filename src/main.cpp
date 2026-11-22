@@ -257,14 +257,23 @@ int main(int argc, char *argv[])
         }
         // models.json хранит имена файлов репозитория, но абсолютный путь в
         // записи (ручная правка, будущий формат) тоже должен остаться верным.
-        const int rebased = Provenance::instance().rebasePaths(apppaths::legacyDownloadDir(),
-                                                               apppaths::downloadDir());
-        if (rebased > 0)
-            logLine(QStringLiteral("downloads: %1 path(s) updated in models.json").arg(rebased));
+        // Только после полностью успешного переноса: иначе запись указывала бы
+        // на каталог, куда файл не переехал (больше не чинится задним числом).
+        if (moved.moved > 0 && moved.skipped.isEmpty()) {
+            const int rebased = Provenance::instance().rebasePaths(apppaths::legacyDownloadDir(),
+                                                                   apppaths::downloadDir());
+            if (rebased > 0)
+                logLine(QStringLiteral("downloads: %1 path(s) updated in models.json").arg(rebased));
+            else if (rebased < 0)
+                logLine(QStringLiteral("warning: models.json was not updated (write failed), "
+                                       "its paths keep the old location"));
+        }
         if (!moved.skipped.isEmpty()) {
             logLine(QStringLiteral("warning: downloads left in %1 (name taken or rename failed): %2")
                         .arg(apppaths::legacyDownloadDir(),
                              moved.skipped.join(QStringLiteral(", "))));
+            logLine(QStringLiteral("models.json: paths keep the old location, "
+                                   "the files are still there"));
         }
     }
 

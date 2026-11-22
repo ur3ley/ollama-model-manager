@@ -1851,7 +1851,8 @@ void testAdminApiRestriction()
     const Response laptopDelete = sendRequest(QHostAddress::LocalHost, f.proxy.listenPort(),
                                               request("DELETE", "/api/delete", "secret-token-1"));
 
-    // По умолчанию (admin_api=open) — прежнее поведение.
+    // Структурный дефолт ProxyConfig: restrictAdminApi=false, т.е. «open».
+    // Приложение сюда не попадает — ProxySettings::load() даёт restricted.
     Fixture open(FakeUpstream::Normal, baseConfig(), tokens);
     const Response openDelete = sendRequest(QHostAddress::LocalHost, open.proxy.listenPort(),
                                             request("DELETE", "/api/delete", "secret-token-2"));
