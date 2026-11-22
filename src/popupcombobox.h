@@ -7,9 +7,10 @@
 #include <QScrollBar>
 
 // QComboBox whose popup keeps a predictable height. Qt's style-sheet proxy
-// reports SH_ComboBox_Popup and then ignores maxVisibleItems, so a two-entry
-// list could open one-and-a-half rows high with a scrollbar. This clamps the
-// container to `rows * rowHeight + chrome` and keeps it on screen.
+// reports SH_ComboBox_Popup (which bloats the popup and ignores
+// maxVisibleItems), but the global sheet turns that mode off. The remaining
+// job here is to clamp the container to `rows * rowHeight + border` and keep
+// it on screen, so a two-entry list opens exactly two rows high.
 class PopupComboBox : public QComboBox
 {
     Q_OBJECT
@@ -25,8 +26,8 @@ public:
     void showPopup() override
     {
         view()->setMinimumWidth(width());
-        // Size the list before the container lays itself out: Qt's own height
-        // is one row short on some styles, which produces the arrow scrollers.
+        // Size the list before the container lays itself out: otherwise Qt
+        // counts only the rows, and the view's 1px border clips the last one.
         const int rows = qMin(count(), kMaxVisibleRows);
         const int rowHeight = qMax(1, view()->sizeHintForRow(0));
         const int wantedView = rows * rowHeight + 2;

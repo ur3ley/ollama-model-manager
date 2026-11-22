@@ -53,20 +53,23 @@ public:
 
     void showPopup() override
     {
-        // Never narrower than the closed combo, then clamp the container after
-        // Qt has laid it out from the item sizes.
+        // Never narrower than the closed combo. Size the list before the
+        // container lays itself out, so the popup is an exact number of rows
+        // plus the view's own 1px border and no row is clipped in half.
         view()->setMinimumWidth(width());
+        const int rows = qMin(count(), kMaxVisibleRows);
+        const int rowHeight = qMax(1, view()->sizeHintForRow(0));
+        const int wantedView = rows * rowHeight + 2;
+        view()->setMinimumHeight(wantedView);
+        view()->setMaximumHeight(wantedView);
+
         QComboBox::showPopup();
 
         QWidget *popup = view()->window();
         if (!popup)
             return;
-        // Styles that report SH_ComboBox_Popup (and the style-sheet proxy does)
-        // ignore maxVisibleItems, so bound the height by hand as well.
-        const int rows = qMin(count(), kMaxVisibleRows);
-        const int rowHeight = qMax(1, view()->sizeHintForRow(0));
         const int chrome = qMax(0, popup->height() - view()->height());
-        const int maxHeight = rows * rowHeight + chrome;
+        const int maxHeight = wantedView + chrome;
         if (popup->height() > maxHeight)
             popup->resize(popup->width(), maxHeight);
 

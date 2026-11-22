@@ -421,6 +421,12 @@ QComboBox {
     border-radius: 8px;
     padding: 5px 8px;
     min-height: 18px;
+    /* The style-sheet proxy defaults to a "menu popup": it forces the list's
+       vertical scrollbar off and paints two arrow scrollers over the rows,
+       which shrink the popup and leave no handle to drag. Use a plain list
+       popup instead, so an overflowing list gets an ordinary slim scrollbar
+       on the right and the mouse wheel scrolls it. */
+    combobox-popup: 0;
 }
 QComboBox:hover { border-color: @borderStrong; }
 QComboBox:focus { border: 2px solid @accent; padding: 4px 7px; }
@@ -434,8 +440,8 @@ QComboBox::down-arrow {
 QComboBox QAbstractItemView {
     /* The popup must read as a layer above the card: a slightly different
        surface plus a stronger outline, otherwise the rows melt into the form.
-       Row metrics are left to the style: overriding item padding/min-height
-       made the popup clip two-row lists and show a scrollbar. */
+       The container is sized from the row metrics below, so a list only gets
+       a scrollbar when it really has more rows than fit. */
     background: @popup;
     color: @text;
     border: 1px solid @borderStrong;
@@ -444,6 +450,26 @@ QComboBox QAbstractItemView {
     selection-background-color: @selected;
     selection-color: @text;
 }
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 0 8px;
+}
+/* Popup scrollbar: inset from the rounded outline, no arrow buttons. */
+QComboBox QAbstractItemView QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 4px 3px 4px 0;
+}
+QComboBox QAbstractItemView QScrollBar::handle:vertical {
+    background: @borderStrong;
+    min-height: 24px;
+    border-radius: 3px;
+}
+QComboBox QAbstractItemView QScrollBar::handle:vertical:hover { background: @muted; }
+QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-line:vertical { height: 0; border: none; }
+QComboBox QAbstractItemView QScrollBar::add-page:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-page:vertical { background: transparent; }
 
 QCheckBox, QRadioButton { color: @text; spacing: 8px; }
 QCheckBox:disabled, QRadioButton:disabled { color: @faint; }
