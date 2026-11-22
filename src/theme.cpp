@@ -1,5 +1,7 @@
 #include "theme.h"
 
+#include "apppaths.h"
+
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -16,8 +18,7 @@ namespace {
 
 QString configPath()
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-    return QDir(base).filePath(QStringLiteral("ollama-manager/config.ini"));
+    return apppaths::configFile();
 }
 
 QPalette buildPalette(const Palette &p)
@@ -203,9 +204,11 @@ void Theme::setMode(Mode mode)
     }
     install();
     if (!m_envOverride) {
+        apppaths::ensurePrivateDir(apppaths::configDir());
         QSettings ini(configPath(), QSettings::IniFormat);
         ini.setValue(QStringLiteral("ui/theme"), modeToString(mode));
         ini.sync();
+        apppaths::restrictFile(configPath());
     }
     emit changed();
 }

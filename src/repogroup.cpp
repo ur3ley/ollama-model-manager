@@ -43,13 +43,13 @@ QString RepoGroup::originalRefOf(const QString &modelName) const
     return QString();
 }
 
-QList<RepoGroup> groupInstalledModels(const QList<OllamaCli::ModelInfo> &models,
+QList<RepoGroup> groupInstalledModels(const QList<OllamaModelInfo> &models,
                                       const Provenance &prov)
 {
     QList<RepoGroup> groups;
     QHash<QString, int> indexById;
 
-    for (const OllamaCli::ModelInfo &model : models) {
+    for (const OllamaModelInfo &model : models) {
         if (model.name.isEmpty())
             continue;
 

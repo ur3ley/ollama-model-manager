@@ -41,6 +41,7 @@ namespace {
 // combo width or the screen it opens on.
 class VariantComboBox : public QComboBox
 {
+    Q_OBJECT
 public:
     explicit VariantComboBox(QWidget *parent = nullptr)
         : QComboBox(parent)
@@ -624,7 +625,7 @@ void ModelBrowserPanel::patchVariant(const QString &itemId, const QString &varia
     for (int row = 0; row < m_variantCombo->count(); ++row) {
         if (m_variantCombo->itemData(row, Qt::UserRole + 1).toString() != variantId)
             continue;
-        for (const BrowserVariant &variant : item->variants) {
+        for (const BrowserVariant &variant : std::as_const(item->variants)) {
             if (variant.id != variantId)
                 continue;
             updateVariantRow(row, variant);
@@ -697,8 +698,8 @@ void ModelBrowserPanel::updateSpecs()
     auto value = [](const QString &text) {
         return QStringLiteral("<b>") + text.toHtmlEscaped() + QStringLiteral("</b>");
     };
-    auto pair = [&key, &value](const QString &label, const QString &data) {
-        return key(label) + QLatin1Char(' ') + value(data);
+    auto pair = [&key, &value](const QString &label, const QString &text) {
+        return key(label) + QLatin1Char(' ') + value(text);
     };
 
     QStringList parts;
@@ -988,3 +989,6 @@ void ModelBrowserPanel::setStatus(const QString &status)
 {
     m_statusLabel->setText(status);
 }
+
+// Q_OBJECT classes defined in this file (A-7).
+#include "modelbrowserpanel.moc"

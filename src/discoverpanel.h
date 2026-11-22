@@ -3,15 +3,17 @@
 
 #include <QHash>
 #include <QList>
+#include <QPointer>
 #include <QSet>
 #include <QWidget>
 
 #include "hfclient.h"
 #include "hfvariants.h"
 #include "modelfilters.h"
+#include "ollamacli.h"
 #include "registryclient.h"
 
-class OllamaCli;
+class InstallService;
 class ModelBrowserPanel;
 class QComboBox;
 class QLineEdit;
@@ -20,15 +22,16 @@ class QPushButton;
 // One source tab of the hub: search + sort + filters + card list.
 //
 // Source::Ollama browses ollama.com and installs via `ollama pull`;
-// Source::HuggingFace browses GGUF repositories, downloads a quant and asks the
-// host window to create the model (`modelCreateRequested`).
+// Source::HuggingFace browses GGUF repositories, downloads a quant and imports
+// it with `ollama create`. Installation itself (provenance, cleanup) is
+// InstallService's job; the panel shows its OllamaJob (A-1, A-2).
 class DiscoverPanel : public QWidget
 {
     Q_OBJECT
 public:
     enum class Source { Ollama, HuggingFace };
 
-    explicit DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent = nullptr);
+    explicit DiscoverPanel(Source source, InstallService *install, QWidget *parent = nullptr);
 
     /** HuggingFace token dialog (opened from the Tools menu). */
     void openTokenDialog();
@@ -50,7 +53,6 @@ public:
     void startInstall();
 
 signals:
-    void modelCreateRequested(const QString &name, const QString &modelfileContent);
     void installedChanged();
 
 private slots:
@@ -60,8 +62,10 @@ private slots:
     void onCancel();
     void onDownloadProgress(qint64 received, qint64 total);
     void onDownloadFinished(bool ok, const QString &path, const QString &error);
-    void onPullProgress(const QString &label, int percent, qint64 received, qint64 total);
-    void onPullFinished(bool ok, const QString &output);
+    void onPullProgress(const QString &label, int percent,
+                        qint64 received, qint64 total);
+    void onPullFinished(const QString &name, bool ok, const QString &output);
+    void onCreateFinished(const QString &name, bool ok, const QString &output, quint64 freed);
 
 private:
     void setupUi();
@@ -71,7 +75,8 @@ private:
     /** 401 from the Hub: append the "use the Token… button" hint. */
     QString hfErrorText(const QString &error) const;
     void updateFilterButton();
-    void refreshInstalled();
+    /** Cache of `ollama list`, fed by whoever ran it (no CLI call here). */
+    void applyInstalledList(const QList<OllamaCli::ModelInfo> &models);
     void applySort(QList<RegistryClient::Model> &models) const;
     QString hfSortKey() const;
 
@@ -108,6 +113,7 @@ private:
     void applyHfVariants(const QString &itemId);
 
     Source m_source;
+    InstallService *m_install;
     OllamaCli *m_cli;
     RegistryClient *m_registry;
     HfClient *m_hf;
@@ -133,17 +139,14 @@ private:
     QString m_pendingItemId;
     QString m_pendingRepo;
     QString m_pendingFile;
-    QString m_pullingName;
+    // This panel's own operations: results of other tabs never reach it.
+    QPointer<OllamaJob> m_pullJob;
     // Set while `ollama create` runs for a freshly downloaded GGUF: the model
-    // is not "installed" until that process finishes successfully.
-    QString m_pendingCreateName;
-    QString m_pendingCreateRepo;
-    QString m_pendingCreateFile;
-    // Downloaded GGUF sources of the model being created; removed after a
-    // successful import, because Ollama keeps its own copy in the blob store.
-    QStringList m_pendingCreateSources;
+    // is not "installed" until that job finishes successfully.
+    QPointer<OllamaJob> m_createJob;
     bool m_tokenLoaded = false;    // wallet read already attempted
 
+    QString m_queueRevision;       // commit the queue downloads from ("" = main)
     QStringList m_queueFiles;      // parts still to download, part order
     QList<qint64> m_queueSizes;    // planned bytes per part (0 when unknown)
     QString m_queueFirstFile;

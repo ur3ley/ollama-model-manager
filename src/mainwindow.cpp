@@ -2,6 +2,7 @@
 #include "bindsourcedialog.h"
 #include "ggufimportdialog.h"
 #include "discoverpanel.h"
+#include "installservice.h"
 #include "provenance.h"
 #include "registryclient.h"
 #include "renamedialog.h"
@@ -11,6 +12,7 @@
 #include "startpageheader.h"
 #include "tokenmanager.h"
 #include "tokendialog.h"
+#include "uisettings.h"
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -19,46 +21,22 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QApplication>
-#include <QTemporaryFile>
 #include <QDir>
 #include <QFileInfo>
-#include <QRegularExpression>
-#include <QSettings>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QProgressDialog>
+
+#include <memory>
 #include "i18n.h"
 #include "theme.h"
 
-namespace {
-
-// Downloaded GGUF sources live next to the app config, not in Ollama's blob
-// store: deleting a model does not free them automatically.
-QString downloadDir()
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-            + QStringLiteral("/models");
-}
-
-// `model-IQ4_XS-MTP-00001-of-00003.gguf` covers all of its shards; a plain file
-// matches itself only.
-QString sourceFilePattern(const QString &file)
-{
-    static const QRegularExpression splitRe(
-            QStringLiteral("^(.*)-\\d{5}-of-\\d{5}\\.gguf$"),
-            QRegularExpression::CaseInsensitiveOption);
-    const QString base = QFileInfo(file).fileName();
-    const QRegularExpressionMatch match = splitRe.match(base);
-    return match.hasMatch() ? match.captured(1) + QStringLiteral("-*.gguf") : base;
-}
-
-
-} // namespace
 
 MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *parent)
     : QMainWindow(parent)
     , m_cli(new OllamaCli(this))
+    , m_install(new InstallService(m_cli, &Provenance::instance(), this))
     , m_tokens(tokens)
     , m_proxy(service)
 {
@@ -69,74 +47,46 @@ MainWindow::MainWindow(TokenManager *tokens, ProxyService *service, QWidget *par
     retranslateUi();
     connect(I18n::instance(), &I18n::languageChanged, this, &MainWindow::retranslateUi);
 
-    connect(m_cli, &OllamaCli::createFinished, this, [this](bool success, const QString &output) {
-        if (success) {
-            statusBar()->showMessage(T("status.created"), 5000);
-        } else {
-            QMessageBox::warning(this, T("error.title"),
-                                 T("error.createFailed").arg(output));
+    // Status and refresh for every finished change of the installed set,
+    // whoever started it. Results are taken from the job itself; nothing is
+    // matched by model name (A-1).
+    connect(m_cli, &OllamaCli::jobFinished, this, [this](OllamaJob *job) {
+        switch (job->kind()) {
+        case OllamaJob::Kind::Create:
+            if (job->success()) {
+                statusBar()->showMessage(T("status.created"), 5000);
+            } else {
+                QMessageBox::warning(this, T("error.title"),
+                                     T("error.createFailed").arg(job->output()));
+            }
+            break;
+        case OllamaJob::Kind::Delete:
+            if (job->success()) {
+                statusBar()->showMessage(T("status.deleted"), 3000);
+            } else {
+                QMessageBox::warning(this, T("error.title"),
+                                     T("error.deleteFailed").arg(job->output()));
+            }
+            break;
+        case OllamaJob::Kind::Copy:
+        case OllamaJob::Kind::Rename:
+        case OllamaJob::Kind::Pull:
+            break;
+        case OllamaJob::Kind::Show:
+        case OllamaJob::Kind::BlobUsage:
+            return;  // read-only
         }
         onRefreshAll();
     });
 
-    connect(m_cli, &OllamaCli::deleteFinished, this, [this](bool success, const QString &output) {
-        if (success) {
-            statusBar()->showMessage(T("status.deleted"), 3000);
-        } else {
-            QMessageBox::warning(this, T("error.title"),
-                                 T("error.deleteFailed").arg(output));
+    // A failed `ollama list` (daemon down) used to leave the old list in place
+    // without a word.
+    connect(m_cli, &OllamaCli::modelsListed, this,
+            [this](bool ok, const QList<OllamaCli::ModelInfo> &, const QString &error) {
+        if (!ok) {
+            statusBar()->showMessage(T("list.listFailed")
+                    .arg(error.isEmpty() ? QStringLiteral("ollama list") : error), 10000);
         }
-        onRefreshAll();
-    });
-
-    connect(m_cli, &OllamaCli::renameFinished, this,
-            [this](bool success, const QString &output) {
-        const QString oldName = m_renameOld;
-        const QString newName = m_renameNew;
-        const QString selectId = m_renameSelectId;
-        const QString content = m_renameContent;
-        m_renameOld.clear();
-        m_renameNew.clear();
-        m_renameSelectId.clear();
-        m_renameContent.clear();
-
-        if (!success) {
-            QMessageBox::warning(this, T("error.title"), T("error.renameFailed").arg(output));
-            onRefreshAll();
-            return;
-        }
-
-        // The original ref is what ties the model to its repository: move the
-        // entry to the new name instead of dropping it.
-        Provenance::instance().rename(oldName, newName);
-        statusBar()->showMessage(T("status.renamed"), 3000);
-        m_pendingSelectRepo = selectId;
-
-        if (content.isEmpty()) {
-            onRefreshAll();
-            return;
-        }
-
-        // Rename + new parameters: the data already lives under the new name,
-        // so the Modelfile (FROM new name) rebuilds it in place.
-        const QString path = writeTempModelfile(content);
-        if (path.isEmpty()) {
-            QMessageBox::warning(this, T("error.title"), T("error.tmpModelfile"));
-            onRefreshAll();
-            return;
-        }
-        statusBar()->showMessage(T("status.updating").arg(newName));
-        m_cli->createModelAsync(newName, path);
-    });
-
-    connect(m_cli, &OllamaCli::copyFinished, this, [this](bool success, const QString &output) {
-        if (success) {
-            statusBar()->showMessage(T("status.renamed"), 3000);
-        } else {
-            QMessageBox::warning(this, T("error.title"),
-                                 T("error.renameFailed").arg(output));
-        }
-        onRefreshAll();
     });
 
     onRefreshAll();
@@ -165,15 +115,11 @@ void MainWindow::setupUI()
     installedLayout->addWidget(m_splitter, 1);
     m_tabs->addTab(installedTab, QString());
 
-    m_ollamaPanel = new DiscoverPanel(DiscoverPanel::Source::Ollama, m_cli);
+    m_ollamaPanel = new DiscoverPanel(DiscoverPanel::Source::Ollama, m_install);
     m_tabs->addTab(m_ollamaPanel, QString());
-    m_hfPanel = new DiscoverPanel(DiscoverPanel::Source::HuggingFace, m_cli);
+    m_hfPanel = new DiscoverPanel(DiscoverPanel::Source::HuggingFace, m_install);
     m_tabs->addTab(m_hfPanel, QString());
 
-    connect(m_ollamaPanel, &DiscoverPanel::modelCreateRequested,
-            this, &MainWindow::onCreateModel);
-    connect(m_hfPanel, &DiscoverPanel::modelCreateRequested,
-            this, &MainWindow::onCreateModel);
     connect(m_ollamaPanel, &DiscoverPanel::installedChanged, this, &MainWindow::onRefreshAll);
     connect(m_hfPanel, &DiscoverPanel::installedChanged, this, &MainWindow::onRefreshAll);
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
@@ -188,7 +134,7 @@ void MainWindow::setupUI()
     m_listWidget->setMaximumWidth(460);
     m_splitter->addWidget(m_listWidget);
 
-    m_editorWidget = new ModelEditorWidget(m_cli);
+    m_editorWidget = new ModelEditorWidget(m_install);
     m_editorWidget->setMinimumWidth(400);
     m_splitter->addWidget(m_editorWidget);
 
@@ -340,9 +286,9 @@ void MainWindow::buildLanguageMenu()
         act->setChecked(code == current);
         act->setData(code);
         m_langGroup->addAction(act);
-        connect(act, &QAction::triggered, this, [this, code]() {
+        connect(act, &QAction::triggered, this, [code]() {
             if (I18n::instance()->setLanguage(code)) {
-                QSettings().setValue("language", code);
+                uisettings::setLanguage(code);
             }
         });
     }
@@ -388,8 +334,17 @@ void MainWindow::retranslateUi()
 
 void MainWindow::onRefreshAll()
 {
-    m_listWidget->refresh();
-    m_editorWidget->setAvailableModels(m_listWidget->modelNames());
+    // One job end often asks twice in the same turn (jobFinished + the panel's
+    // installedChanged): coalesce into a single `ollama list` (P-3).
+    if (m_refreshQueued)
+        return;
+    m_refreshQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_refreshQueued = false;
+        // The editor gets the new names from modelsLoaded, once the list is in;
+        // m_listWidget->modelNames() here would still be the old list.
+        m_listWidget->refresh();
+    });
 }
 
 void MainWindow::onRepoSelected(const QString &id)
@@ -536,13 +491,22 @@ void MainWindow::onNewModel()
 
 void MainWindow::onDeleteModel(const QString &modelName)
 {
-    QString blob = m_cli->getModelFromBlob(modelName);
-    int refCount = m_cli->countBlobReferences(blob);
+    // Counting the models that share the blob takes `ollama list` plus one
+    // `show --modelfile` per model: asynchronous, the window stays live (P-1).
+    statusBar()->showMessage(T("delete.checking").arg(modelName));
+    OllamaJob *usage = m_cli->blobUsageAsync(modelName);
+    connect(usage, &OllamaJob::finished, this, [this, usage, modelName](bool, const QString &) {
+        statusBar()->clearMessage();
+        // A failed check is not a reason to refuse: the dialog then speaks of
+        // the last copy, the cautious wording.
+        confirmDelete(modelName, usage->blobReferences());
+    });
+}
 
+void MainWindow::confirmDelete(const QString &modelName, int refCount)
+{
     QString message;
-    QMessageBox::StandardButtons buttons = QMessageBox::Yes | QMessageBox::No;
     QMessageBox::Icon icon = QMessageBox::Question;
-
     if (refCount > 1) {
         message = T("delete.shared").arg(modelName).arg(refCount - 1);
     } else {
@@ -551,33 +515,19 @@ void MainWindow::onDeleteModel(const QString &modelName)
     }
     message += QStringLiteral("\n\n") + T("delete.onlyQuant");
 
-    // The downloaded GGUF sources are a second full copy; deleting the model
-    // always frees them too, unless the import never finished.
-    QStringList sourceFiles;
-    const Provenance::Entry prov = Provenance::instance().lookup(modelName);
-    if (!prov.file.isEmpty()) {
-        const QDir dir(downloadDir());
-        for (const QString &name : dir.entryList({sourceFilePattern(prov.file)}, QDir::Files))
-            sourceFiles << dir.filePath(name);
-    }
-
-    QMessageBox box(icon, T("delete.title"), message, buttons, this);
-    if (box.exec() == QMessageBox::Yes) {
-        // The model may have a provenance record (source repo + file). Drop it
-        // together with the model, otherwise the browser keeps claiming the
-        // quant is "downloaded" after the model is gone.
-        connect(m_cli, &OllamaCli::deleteFinished, this,
-                [modelName, sourceFiles](bool ok, const QString &) {
-            if (!ok)
-                return;
-            Provenance::instance().remove(modelName);
-            for (const QString &path : sourceFiles) {
-                QFile::remove(path);
-                QFile::remove(path + QStringLiteral(".part"));
-            }
-        }, Qt::SingleShotConnection);
-        m_cli->deleteModelAsync(modelName);
-    }
+    // Window-modal, but not a nested event loop: the answer arrives as a signal.
+    auto *box = new QMessageBox(icon, T("delete.title"), message,
+                                QMessageBox::Yes | QMessageBox::No, this);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setWindowModality(Qt::WindowModal);
+    connect(box, &QMessageBox::finished, this, [this, box, modelName](int) {
+        if (box->clickedButton() != box->button(QMessageBox::Yes))
+            return;
+        // Provenance and the downloaded GGUF sources go with this very job,
+        // never with another delete that happens to finish first (B-11).
+        m_install->deleteModel(modelName);
+    });
+    box->open();
 }
 
 void MainWindow::onRenameModelDirect(const QString &oldName, const QString &newName)
@@ -602,14 +552,32 @@ void MainWindow::startRename(const QString &oldName, const QString &newName,
     const RepoGroup group = m_listWidget->groupOfModel(oldName);
     // Grouping is ref-based, so the card id survives a rename — except for a
     // local model, whose id is derived from its current name.
-    m_renameSelectId = (group.local && group.quants.size() <= 1)
+    const QString selectId = (group.local && group.quants.size() <= 1)
             ? QStringLiteral("local:") + newName
             : group.id;
-    m_renameOld = oldName;
-    m_renameNew = newName;
-    m_renameContent = content;
     statusBar()->showMessage(T("status.renaming").arg(newName));
-    m_cli->renameModelAsync(oldName, newName);
+    OllamaJob *job = m_install->renameModel(oldName, newName);
+    connect(job, &OllamaJob::finished, this,
+            [this, job, newName, selectId, content](bool success, const QString &output) {
+        if (!success && !job->partial()) {
+            QMessageBox::warning(this, T("error.title"), T("error.renameFailed").arg(output));
+            return;
+        }
+        // InstallService has moved the provenance entry already.
+        m_pendingSelectRepo = selectId;
+        if (job->partial()) {
+            // The copy exists under the new name, the old one is still there.
+            QMessageBox::warning(this, T("error.title"), T("error.renamePartial").arg(newName, output));
+            return;
+        }
+        statusBar()->showMessage(T("status.renamed"), 3000);
+        if (content.isEmpty())
+            return;
+        // Rename + new parameters: the data already lives under the new name,
+        // so the Modelfile (FROM new name) rebuilds it in place.
+        statusBar()->showMessage(T("status.updating").arg(newName));
+        m_install->createModel(newName, content);
+    });
 }
 
 void MainWindow::onRenameModel(const QString &modelName)
@@ -645,13 +613,8 @@ void MainWindow::onDownloadModel()
 
 void MainWindow::onCreateModel(const QString &name, const QString &modelfileContent)
 {
-    QString path = writeTempModelfile(modelfileContent);
-    if (path.isEmpty()) {
-        QMessageBox::warning(this, T("error.title"), T("error.tmpModelfile"));
-        return;
-    }
     statusBar()->showMessage(T("status.creating").arg(name));
-    m_cli->createModelAsync(name, path);
+    m_install->createModel(name, modelfileContent);
 }
 
 void MainWindow::onUpdateModel(const QString &name, const QString &modelfileContent)
@@ -661,28 +624,7 @@ void MainWindow::onUpdateModel(const QString &name, const QString &modelfileCont
                                      QMessageBox::Yes | QMessageBox::No,
                                      QMessageBox::No);
     if (ret == QMessageBox::Yes) {
-        QString path = writeTempModelfile(modelfileContent);
-        if (path.isEmpty()) {
-            QMessageBox::warning(this, T("error.title"), T("error.tmpModelfile"));
-            return;
-        }
         statusBar()->showMessage(T("status.updating").arg(name));
-        m_cli->createModelAsync(name, path);
+        m_install->createModel(name, modelfileContent);
     }
-}
-
-QString MainWindow::writeTempModelfile(const QString &content)
-{
-    QString tempPath = QDir::temp().filePath(
-        "ollama-modelfile-" + QString::number(QCoreApplication::applicationPid()) + ".tmp");
-
-    QFile f(tempPath);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        qWarning("Cannot write to %s: %s",
-                 qPrintable(tempPath), qPrintable(f.errorString()));
-        return QString();
-    }
-    f.write(content.toUtf8());
-    f.close();
-    return tempPath;
 }

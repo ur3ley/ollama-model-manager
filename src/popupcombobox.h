@@ -12,6 +12,7 @@
 // container to `rows * rowHeight + chrome` and keeps it on screen.
 class PopupComboBox : public QComboBox
 {
+    Q_OBJECT
 public:
     explicit PopupComboBox(QWidget *parent = nullptr)
         : QComboBox(parent)

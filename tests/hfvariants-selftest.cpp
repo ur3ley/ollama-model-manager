@@ -9,6 +9,7 @@
 #include "hfvariants.h"
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTextStream>
 
@@ -274,14 +275,23 @@ int main(int argc, char *argv[])
     // --- Modelfile wildcard prefix -----------------------------------------
     {
         check(splitWildcardPattern(QStringLiteral("model-Q4_K_M-00001-of-00003.gguf"))
-                      == QStringLiteral("model-Q4_K_M-*.gguf"),
+                      == QStringLiteral("model-Q4_K_M-\?\?\?\?\?-of-00003.gguf"),
               QStringLiteral("wildcard from the first part"));
         check(splitWildcardPattern(QStringLiteral("Q4_K_M/model-IQ2_XS-00002-of-00002.gguf"))
-                      == QStringLiteral("model-IQ2_XS-*.gguf"),
+                      == QStringLiteral("model-IQ2_XS-\?\?\?\?\?-of-00002.gguf"),
               QStringLiteral("wildcard keeps the base name and drops the directory"));
         check(splitWildcardPattern(QStringLiteral("nested/Q8_0/model-Q8_0-00001-of-00012.GGUF"))
-                      == QStringLiteral("model-Q8_0-*.gguf"),
-              QStringLiteral("wildcard is case-insensitive"));
+                      == QStringLiteral("model-Q8_0-\?\?\?\?\?-of-00012.GGUF"),
+              QStringLiteral("wildcard is case-insensitive and keeps the extension case"));
+        // B-13: a neighbouring series with the same prefix is not matched.
+        {
+            const QRegularExpression glob(QRegularExpression::wildcardToRegularExpression(
+                    splitWildcardPattern(QStringLiteral("X-Q4_K_M-00001-of-00003.gguf"))));
+            check(glob.match(QStringLiteral("X-Q4_K_M-00002-of-00003.gguf")).hasMatch()
+                          && !glob.match(QStringLiteral("X-Q4_K_M-MTP-00001-of-00003.gguf")).hasMatch()
+                          && !glob.match(QStringLiteral("X-Q4_K_M-00001-of-00004.gguf")).hasMatch(),
+                  QStringLiteral("wildcard matches only its own shard series"));
+        }
         check(splitWildcardPattern(QStringLiteral("model-Q4_K_M.gguf"))
                       == QStringLiteral("model-Q4_K_M.gguf"),
               QStringLiteral("a single file is not turned into a wildcard"));

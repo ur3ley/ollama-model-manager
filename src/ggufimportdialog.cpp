@@ -1,4 +1,5 @@
 #include "ggufimportdialog.h"
+#include "modelfilebuilder.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -184,7 +185,7 @@ void GGUFImportDialog::updatePreview()
     m_createBtn->setEnabled(ready);
 
     if (ready) {
-        QString modelfile = "FROM " + path + "\n";
+        const QString modelfile = ModelfileBuilder::fromLine(path);
         m_previewEdit->setPlainText(modelfile);
         m_previewLabel->setText(T("gguf.willCreate").arg(name));
     } else {
@@ -207,5 +208,5 @@ QString GGUFImportDialog::generatedModelfile() const
 {
     QString path = m_pathEdit->text();
     if (path.isEmpty()) return QString();
-    return "FROM " + path + "\n";
+    return ModelfileBuilder::fromLine(path);
 }

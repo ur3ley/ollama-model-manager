@@ -34,10 +34,10 @@ const RepoGroup *findGroup(const QList<RepoGroup> &groups, const QString &id)
     return nullptr;
 }
 
-OllamaCli::ModelInfo model(const QString &name, const QString &id,
+OllamaModelInfo model(const QString &name, const QString &id,
                            const QString &size, const QString &modified)
 {
-    OllamaCli::ModelInfo info;
+    OllamaModelInfo info;
     info.name = name;
     info.id = id;
     info.size = size;
@@ -86,7 +86,7 @@ int main(int argc, char *argv[])
     entry.ref = QStringLiteral("translategemma:27b");
     store.record(QStringLiteral("translategemma:27b-it-q8_0"), entry);
 
-    QList<OllamaCli::ModelInfo> models;
+    QList<OllamaModelInfo> models;
     models << model(QStringLiteral("qwen3.8:latest"), QStringLiteral("id1"),
                     QStringLiteral("17 GB"), QStringLiteral("2 days ago"))
            << model(QStringLiteral("qwen3.8:q4_K_M"), QStringLiteral("id2"),
@@ -176,7 +176,7 @@ int main(int argc, char *argv[])
     check(moved.digest == QStringLiteral("aaa111"), QStringLiteral("rename keeps the digest"));
 
     // Regrouping after the rename keeps one card and marks the quant as renamed.
-    QList<OllamaCli::ModelInfo> afterRename;
+    QList<OllamaModelInfo> afterRename;
     afterRename << model(QStringLiteral("qwen3.8:renamed"), QStringLiteral("id1"),
                          QStringLiteral("17 GB"), QStringLiteral("2 days ago"))
                 << model(QStringLiteral("qwen3.8:q4_K_M"), QStringLiteral("id2"),
@@ -219,7 +219,7 @@ int main(int argc, char *argv[])
 
     // Renaming the bound model keeps the repository card (ref-based grouping).
     store.rename(QStringLiteral("gemma4:e4b"), QStringLiteral("gemma4:renamed"));
-    QList<OllamaCli::ModelInfo> renamedList;
+    QList<OllamaModelInfo> renamedList;
     renamedList << model(QStringLiteral("gemma4:renamed"), QStringLiteral("id6"),
                          QStringLiteral("6.6 GB"), QStringLiteral("7 days ago"));
     const QList<RepoGroup> afterBoundRename = groupInstalledModels(renamedList, store);
@@ -232,7 +232,7 @@ int main(int argc, char *argv[])
     }
 
     // Same for HuggingFace: a local model bound to a repo joins that repo card.
-    QList<OllamaCli::ModelInfo> mystery;
+    QList<OllamaModelInfo> mystery;
     mystery << model(QStringLiteral("Mystery-GGUF:q4_k_m"), QStringLiteral("id7"),
                      QStringLiteral("5 GB"), QStringLiteral("1 day ago"));
     const QList<RepoGroup> mysteryLocal = groupInstalledModels(mystery, store);

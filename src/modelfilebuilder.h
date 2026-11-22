@@ -48,7 +48,22 @@ public:
         QMap<QString, QString> extraParams;
     };
 
-    static QString build(const Config &config);
+    /**
+     * Renders the Modelfile. Multi-line values go into `"""…"""` blocks,
+     * which have no escape syntax: a value that itself contains `"""` would
+     * end the block early and turn its tail into Modelfile commands. Such a
+     * config is refused — the result is empty and `error` (if given) names the
+     * offending directive.
+     */
+    static QString build(const Config &config, QString *error = nullptr);
+    /** True when `value` cannot be written as a triple-quoted Modelfile block. */
+    static bool breaksTripleQuotes(const QString &value);
+    /**
+     * `FROM <value>\n`. A value with whitespace (a GGUF path under a directory
+     * with spaces) is put in double quotes, which the Ollama Modelfile parser
+     * strips; without quotes it would end at the first space.
+     */
+    static QString fromLine(const QString &value);
     static Config defaultConfig();
 };
 

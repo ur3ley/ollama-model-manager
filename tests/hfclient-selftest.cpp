@@ -168,6 +168,33 @@ int main(int argc, char *argv[])
     check(authorized.rawHeader("Authorization") == QByteArrayLiteral("Bearer hf_secret"),
           QStringLiteral("request: Bearer header from a pasted token"));
     check(authorized.url() == gatedUrl, QStringLiteral("request: url unchanged"));
+    check(authorized.attribute(QNetworkRequest::RedirectPolicyAttribute).toInt()
+              == int(QNetworkRequest::SameOriginRedirectPolicy),
+          QStringLiteral("request: with a token only same-origin redirects are followed"));
+
+    // S-2: the token must not follow a redirect to another host.
+    QNetworkRequest hop = authorized;
+    hop.setRawHeader("Range", QByteArrayLiteral("bytes=100-"));
+    hop.setTransferTimeout(60000);
+    const QNetworkRequest sameHost = HfClient::redirectRequestFor(
+            hop, QUrl(QStringLiteral("https://HuggingFace.co/api/models/new-name/Llama-3-GGUF")));
+    check(sameHost.rawHeader("Authorization") == QByteArrayLiteral("Bearer hf_secret"),
+          QStringLiteral("redirect: same origin keeps the token"));
+    const QNetworkRequest cdn = HfClient::redirectRequestFor(
+            hop, QUrl(QStringLiteral("https://cdn-lfs.hf.co/repos/ab/cd?X-Amz-Signature=1")));
+    check(!cdn.hasRawHeader("Authorization"), QStringLiteral("redirect: CDN host gets no token"));
+    check(cdn.rawHeader("Range") == QByteArrayLiteral("bytes=100-"),
+          QStringLiteral("redirect: Range survives the hop"));
+    check(cdn.rawHeader("User-Agent") == QByteArrayLiteral("ollama-model-manager"),
+          QStringLiteral("redirect: user agent survives the hop"));
+    check(cdn.transferTimeout() == 60000, QStringLiteral("redirect: stall timeout survives the hop"));
+    check(cdn.url().host() == QLatin1String("cdn-lfs.hf.co"), QStringLiteral("redirect: target url"));
+    check(!HfClient::redirectRequestFor(
+                   hop, QUrl(QStringLiteral("https://huggingface.co:8443/x"))).hasRawHeader("Authorization"),
+          QStringLiteral("redirect: another port is another origin"));
+    check(!HfClient::redirectRequestFor(
+                   hop, QUrl(QStringLiteral("http://huggingface.co/x"))).hasRawHeader("Authorization"),
+          QStringLiteral("redirect: another scheme is another origin"));
 
     check(HfClient::isAuthError(QStringLiteral("HTTP 401: this repository is gated, a token is required")),
           QStringLiteral("error: 401 recognised (hint is added by the panel)"));

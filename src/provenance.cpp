@@ -1,5 +1,7 @@
 #include "provenance.h"
 
+#include "apppaths.h"
+
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -16,18 +18,55 @@ Provenance &Provenance::instance()
 
 QString Provenance::storePath()
 {
+    return QDir(apppaths::configDir()).filePath(QStringLiteral("models.json"));
+}
+
+QString Provenance::legacyStorePath()
+{
+    // Up to 2026-11: AppConfigLocation, i.e. ~/.config/OllamaManager/
+    // Ollama Model Manager/models.json (depends on the app/org names).
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     return QDir(dir.isEmpty() ? QDir::homePath() : dir).filePath(QStringLiteral("models.json"));
 }
 
+bool Provenance::migrateLegacy(const QString &from, const QString &to)
+{
+    if (from.isEmpty() || QFileInfo(from).absoluteFilePath() == QFileInfo(to).absoluteFilePath())
+        return false;
+    // Never overwrite: once the new file exists it is the only source of truth.
+    if (QFileInfo::exists(to) || !QFileInfo::exists(from))
+        return false;
+    const QString dir = QFileInfo(to).absolutePath();
+    if (dir == apppaths::configDir())
+        apppaths::ensurePrivateDir(dir);
+    else
+        QDir().mkpath(dir);
+    if (!QFile::rename(from, to)) {
+        // Different filesystem (bind-mounted config, …): copy, keep the source.
+        if (!QFile::copy(from, to))
+            return false;
+    }
+    apppaths::restrictFile(to);
+    return true;
+}
+
 Provenance::Provenance()
+    : m_path(storePath())
+{
+    migrateLegacy(legacyStorePath(), m_path);
+    load();
+}
+
+Provenance::Provenance(const QString &path, QObject *parent)
+    : QObject(parent)
+    , m_path(path)
 {
     load();
 }
 
 void Provenance::load()
 {
-    QFile file(storePath());
+    QFile file(m_path);
     if (!file.open(QIODevice::ReadOnly))
         return;
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
@@ -37,13 +76,14 @@ void Provenance::load()
 
 void Provenance::save() const
 {
-    const QString path = storePath();
-    QDir().mkpath(QFileInfo(path).absolutePath());
+    const QString &path = m_path;
+    apppaths::ensurePrivateDir(QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         return;
     file.write(QJsonDocument(m_data).toJson(QJsonDocument::Indented));
-    file.commit();
+    if (file.commit())
+        apppaths::restrictFile(path);  // download history: owner only (S-8)
 }
 
 void Provenance::record(const QString &modelName, const Entry &entry)
@@ -67,6 +107,7 @@ void Provenance::record(const QString &modelName, const Entry &entry)
 
     m_data.insert(modelName, obj);
     save();
+    emit changed(modelName);
 }
 
 Provenance::Entry Provenance::lookup(const QString &modelName) const
@@ -93,6 +134,7 @@ void Provenance::remove(const QString &modelName)
         return;
     m_data.remove(modelName);
     save();
+    emit changed(modelName);
 }
 
 void Provenance::rename(const QString &oldName, const QString &newName)
@@ -106,4 +148,38 @@ void Provenance::rename(const QString &oldName, const QString &newName)
     const QJsonValue entry = m_data.take(oldName);
     m_data.insert(newName, entry);
     save();
+    emit changed(oldName);
+    emit changed(newName);
+}
+
+int Provenance::rebasePaths(const QString &from, const QString &to)
+{
+    if (from.isEmpty() || from == to)
+        return 0;
+    const QString prefix = QDir(from).absolutePath() + QLatin1Char('/');
+    const QString target = QDir(to).absolutePath() + QLatin1Char('/');
+    int rewritten = 0;
+    QStringList touched;
+    for (auto it = m_data.begin(); it != m_data.end(); ++it) {
+        QJsonObject obj = it.value().toObject();
+        bool dirty = false;
+        for (auto field = obj.begin(); field != obj.end(); ++field) {
+            const QString value = field.value().toString();
+            if (!value.startsWith(prefix))
+                continue;
+            field.value() = target + value.mid(prefix.size());
+            dirty = true;
+            ++rewritten;
+        }
+        if (dirty) {
+            it.value() = obj;
+            touched << it.key();
+        }
+    }
+    if (rewritten > 0) {
+        save();
+        for (const QString &name : std::as_const(touched))
+            emit changed(name);
+    }
+    return rewritten;
 }

@@ -20,6 +20,7 @@
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace {
 
@@ -27,6 +28,7 @@ namespace {
 // disk line every fifth tick (QStorageInfo can block on a network mount).
 constexpr int kTickMs = 1000;
 constexpr int kDiskEveryTicks = 5;
+constexpr int kStatusEveryTicks = 30;
 
 // render() runs on that timer too, and setText() forces a relayout, so strings
 // are only assigned when they really changed.
@@ -84,6 +86,7 @@ QString sizeText(quint64 bytes)
 // Label + thin bar: one compact metric for the hero row.
 class UsageMeter : public QWidget
 {
+    Q_OBJECT
 public:
     explicit UsageMeter(QWidget *parent = nullptr)
         : QWidget(parent)
@@ -197,8 +200,19 @@ StartPageHeader::StartPageHeader(OllamaCli *cli, QWidget *parent)
     // The palette is applied by the global sheet; only the status dot is a
     // pixmap and has to be repainted by hand.
     connect(theme::Theme::instance(), &theme::Theme::changed, this, [this]() {
-        m_statusDot->setPixmap(dotIcon(m_ollamaOk).pixmap(10, 10));
+        m_statusDot->setPixmap(dotIcon(ollamaHealthy()).pixmap(10, 10));
     });
+    // B-9: a binary in PATH says nothing about the daemon. Every `ollama list`
+    // (start-up, refresh, after each operation) is a real round trip to it, so
+    // its outcome drives the dot without an extra probe.
+    if (m_cli) {
+        connect(m_cli, &OllamaCli::modelsListed, this,
+                [this](bool ok, const QList<OllamaCli::ModelInfo> &, const QString &error) {
+            m_daemonOk = ok;
+            m_daemonError = error.trimmed();
+            render();
+        });
+    }
     connect(I18n::instance(), &I18n::languageChanged, this, &StartPageHeader::retranslateUi);
 
     refreshStatus();
@@ -231,7 +245,12 @@ void StartPageHeader::tick()
     if (!isVisible())
         return;
     refreshMemory();
-    refreshStatus();
+    // Walking PATH stats every directory: twice a minute is plenty to notice a
+    // (re)installed binary; the daemon state comes from `ollama list` (P-4).
+    if (++m_statusTicks >= kStatusEveryTicks) {
+        m_statusTicks = 0;
+        refreshStatus();
+    }
     if (++m_diskTicks >= kDiskEveryTicks) {
         m_diskTicks = 0;
         refreshDisk();
@@ -239,7 +258,7 @@ void StartPageHeader::tick()
     render();
 }
 
-void StartPageHeader::updateSummary(const InstalledSummary &summary)
+void StartPageHeader::updateSummary(InstalledSummary summary)
 {
     m_summary = summary;
     refreshStatus();
@@ -261,18 +280,19 @@ void StartPageHeader::refreshStatus()
     QString path = QStandardPaths::findExecutable(QStringLiteral("ollama"));
     if (path.isEmpty() && m_cli)
         path = m_cli->ollamaPath();
-    // OllamaCli keeps a bare "ollama" when the lookup failed; treat only a real
-    // executable as found, otherwise the hero would always claim a healthy CLI.
+    // Treat only a real executable as found (OllamaCli's path is empty when its
+    // own lookup failed, B-12), otherwise the hero would claim a healthy CLI.
     m_ollamaOk = !path.isEmpty() && QFileInfo(path).isExecutable();
-    m_ollamaPath = path;
+    m_ollamaPath = std::move(path);
 }
 
 void StartPageHeader::refreshDisk()
 {
-    const QDir home(QDir::homePath());
-    QString path = home.filePath(QStringLiteral(".ollama/models"));
-    if (!QFileInfo::exists(path))
-        path = home.path();
+    // The disk that actually holds the blobs: $OLLAMA_MODELS, /var/lib/ollama,
+    // ~/.ollama/models… (B-8); the home disk only when nothing is found.
+    QString path = m_cli ? m_cli->modelsDir() : QString();
+    if (path.isEmpty() || !QFileInfo::exists(path))
+        path = QDir::homePath();
     const QStorageInfo info(path);
     const bool known = info.isValid() && info.isReady();
     m_diskTotalBytes = known ? quint64(info.bytesTotal()) : 0;
@@ -281,8 +301,8 @@ void StartPageHeader::refreshDisk()
 
 void StartPageHeader::refreshMemory()
 {
-    m_ramTotalBytes = memoryinfo::memTotalBytes();
-    const quint64 available = memoryinfo::memAvailableBytes();
+    quint64 available = 0;
+    memoryinfo::readMemInfo(&m_ramTotalBytes, &available);
     m_ramUsedBytes = m_ramTotalBytes > available ? m_ramTotalBytes - available : 0;
 }
 
@@ -301,9 +321,9 @@ void StartPageHeader::render()
     if (empty) {
         setLabelText(m_title, T("hero.emptyTitle"));
         m_title->setToolTip(QString());
-        m_statusDot->setPixmap(dotIcon(m_ollamaOk).pixmap(10, 10));
-        setLabelText(m_hint, m_ollamaOk ? T("hero.emptyHint") : T("hero.ollamaMissing"));
-        setLabelRole(m_hint, m_ollamaOk ? nullptr : "danger");
+        m_statusDot->setPixmap(dotIcon(ollamaHealthy()).pixmap(10, 10));
+        setLabelText(m_hint, ollamaHealthy() ? T("hero.emptyHint") : ollamaProblem());
+        setLabelRole(m_hint, ollamaHealthy() ? nullptr : "danger");
         return;
     }
 
@@ -338,10 +358,26 @@ void StartPageHeader::render()
         m_diskMeter->setVisible(false);
     }
 
-    m_statusDot->setPixmap(dotIcon(m_ollamaOk).pixmap(10, 10));
-    setLabelText(m_statusText, m_ollamaOk ? T("hero.ollamaLabel") : T("hero.ollamaMissing"));
-    setLabelRole(m_statusText, m_ollamaOk ? nullptr : "danger");
-    m_statusText->setToolTip(m_ollamaOk
-                                     ? T("hero.ollamaOk").arg(m_ollamaPath, ollamaPort())
-                                     : T("hero.ollamaMissing"));
+    m_statusDot->setPixmap(dotIcon(ollamaHealthy()).pixmap(10, 10));
+    setLabelText(m_statusText, ollamaHealthy() ? T("hero.ollamaLabel") : ollamaProblem());
+    setLabelRole(m_statusText, ollamaHealthy() ? nullptr : "danger");
+    if (ollamaHealthy())
+        m_statusText->setToolTip(T("hero.ollamaOk").arg(m_ollamaPath, ollamaPort()));
+    else if (m_ollamaOk && !m_daemonError.isEmpty())
+        m_statusText->setToolTip(m_daemonError);
+    else
+        m_statusText->setToolTip(ollamaProblem());
 }
+
+bool StartPageHeader::ollamaHealthy() const
+{
+    return m_ollamaOk && m_daemonOk;
+}
+
+QString StartPageHeader::ollamaProblem() const
+{
+    return m_ollamaOk ? T("hero.ollamaDown") : T("hero.ollamaMissing");
+}
+
+// Q_OBJECT classes defined in this file (A-7).
+#include "startpageheader.moc"

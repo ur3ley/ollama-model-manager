@@ -13,14 +13,35 @@
 #include <QRegularExpressionValidator>
 #include "designtokens.h"
 #include "doticons.h"
+#include "installservice.h"
 #include "memoryinfo.h"
 #include "quantmatch.h"
 
-ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
+ModelEditorWidget::ModelEditorWidget(InstallService *install, QWidget *parent)
     : QWidget(parent)
-    , m_cli(cli)
+    , m_install(install)
+    , m_cli(install->cli())
     , m_registry(new RegistryClient(this))
 {
+    // FROM is editable: wait for typing to settle before asking `ollama show`.
+    // Created before setupUI(), which may already change the FROM text.
+    m_ctxTimer = new QTimer(this);
+    m_ctxTimer->setSingleShot(true);
+    m_ctxTimer->setInterval(250);
+    connect(m_ctxTimer, &QTimer::timeout, this, [this]() {
+        if (m_ctxBase.isEmpty())
+            return;
+        OllamaJob *job = m_cli->showModelAsync(m_ctxBase);
+        m_ctxJob = job;
+        connect(job, &OllamaJob::finished, this, [this, job](bool ok, const QString &) {
+            // A newer FROM (or a cleared one) superseded this request.
+            if (job != m_ctxJob)
+                return;
+            m_ctxJob.clear();
+            m_ctxBase.clear();
+            applyBaseContext(ok, job->params());
+        });
+    });
     setupUI();
 
     connect(theme::Theme::instance(), &theme::Theme::changed, this, [this]() {
@@ -31,23 +52,11 @@ ModelEditorWidget::ModelEditorWidget(OllamaCli *cli, QWidget *parent)
             [this](bool ok, const QList<RegistryClient::Tag> &tags, const QString &error) {
         onFamilyTags(ok, tags, error);
     });
-    connect(m_cli, &OllamaCli::pullFinished, this, [this](bool ok, const QString &output) {
-        if (m_pendingInstall.isEmpty())
+    // Any finished delete (ours or the list's) may remove an entry of the
+    // FROM picker; this is a view refresh, not a result we wait for.
+    connect(m_cli, &OllamaCli::jobFinished, this, [this](OllamaJob *job) {
+        if (job->kind() != OllamaJob::Kind::Delete)
             return;
-        const QString installed = m_pendingInstall;
-        m_pendingInstall.clear();
-        applyRepoModeToFrom();
-        if (!ok) {
-            m_statusLabel->setText(T("editor.quantFailed").arg(output));
-            return;
-        }
-        m_statusLabel->setText(T("editor.quantInstalled").arg(installed));
-        m_localModels.append(installed);
-        rebuildFromCombo(installed);
-        updateNameForSelection();
-        updateModelButtons();
-    });
-    connect(m_cli, &OllamaCli::deleteFinished, this, [this](bool, const QString &) {
         rebuildFromCombo(currentFromName());
         updateNameForSelection();
     });
@@ -529,7 +538,7 @@ void ModelEditorWidget::rebuildFromCombo(const QString &select)
 
     if (!m_repo.id.isEmpty()) {
         // FROM of an installed repository: only its own installed quants.
-        for (const InstalledQuant &quant : m_repo.quants) {
+        for (const InstalledQuant &quant : std::as_const(m_repo.quants)) {
             // Ollama quants are identified by their original tag; a HuggingFace
             // quant by the file's quantization label (IQ4_XS-MTP), because its
             // ref is the repository, not the variant.
@@ -544,17 +553,17 @@ void ModelEditorWidget::rebuildFromCombo(const QString &select)
             m_fromCombo->setItemData(row, true, Qt::UserRole + 2);
         }
     } else {
-        for (const QString &name : m_localModels)
+        for (const QString &name : std::as_const(m_localModels))
             m_fromCombo->addItem(name, name);
     }
 
     if (m_repo.id.isEmpty() && !m_familyTags.isEmpty()) {
         if (m_fromCombo->count() > 0)
             m_fromCombo->insertSeparator(m_fromCombo->count());
-        for (const RegistryClient::Tag &tag : m_familyTags) {
+        for (const RegistryClient::Tag &tag : std::as_const(m_familyTags)) {
             // Already listed as an installed quant of this repository.
             bool duplicate = false;
-            for (const InstalledQuant &quant : m_repo.quants) {
+            for (const InstalledQuant &quant : std::as_const(m_repo.quants)) {
                 if (quant.modelName == tag.name)
                     duplicate = true;
             }
@@ -626,8 +635,8 @@ bool ModelEditorWidget::selectedFromInstalled() const
 
 QString ModelEditorWidget::currentFromName() const
 {
-    const QString data = m_fromCombo->currentData().toString();
-    return data.isEmpty() ? m_fromCombo->currentText().trimmed() : data;
+    const QString modelName = m_fromCombo->currentData().toString();
+    return modelName.isEmpty() ? m_fromCombo->currentText().trimmed() : modelName;
 }
 
 void ModelEditorWidget::updateNameForSelection()
@@ -723,10 +732,28 @@ void ModelEditorWidget::installSelectedQuant()
     const QString name = m_fromCombo->currentData().toString();
     if (name.isEmpty() || m_localModels.contains(name))
         return;
-    m_pendingInstall = name;
+    if (m_installJob)
+        return;
+    // One `ollama pull` at a time: while a discover tab downloads, ours waits
+    // in the CLI queue instead of killing that download (B-2).
     m_fromCombo->setEnabled(false);
-    m_statusLabel->setText(T("editor.quantPulling").arg(name));
-    m_cli->pullModelAsync(name);
+    m_statusLabel->setText(m_cli->isPulling() ? T("editor.quantQueued").arg(name)
+                                              : T("editor.quantPulling").arg(name));
+    OllamaJob *job = m_cli->pullModelAsync(name);
+    m_installJob = job;
+    connect(job, &OllamaJob::finished, this, [this, name](bool ok, const QString &output) {
+        m_installJob.clear();
+        applyRepoModeToFrom();
+        if (!ok) {
+            m_statusLabel->setText(T("editor.quantFailed").arg(output));
+            return;
+        }
+        m_statusLabel->setText(T("editor.quantInstalled").arg(name));
+        m_localModels.append(name);
+        rebuildFromCombo(name);
+        updateNameForSelection();
+        updateModelButtons();
+    });
 }
 
 void ModelEditorWidget::onFromActivated(int index)
@@ -748,7 +775,7 @@ void ModelEditorWidget::onFromActivated(int index)
         m_statusLabel->setText(T("editor.quantNotInstalled"));
 }
 
-void ModelEditorWidget::onFromContextMenu(const QPoint &pos)
+void ModelEditorWidget::onFromContextMenu(QPoint pos)
 {
     const int index = m_fromCombo->view()->currentIndex().row();
     if (index < 0)
@@ -766,7 +793,9 @@ void ModelEditorWidget::onFromContextMenu(const QPoint &pos)
                               T("editor.removeQuantConfirm").arg(name),
                               QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
             == QMessageBox::Yes) {
-        m_cli->deleteModelAsync(name);
+        // Through the service: the quant's provenance and leftover downloads
+        // go with it, bound to this very job (B-11).
+        m_install->deleteModel(name);
     }
 }
 
@@ -787,7 +816,8 @@ void ModelEditorWidget::setCreateMode()
     rebuildFromCombo();
     applyRepoModeToFrom();
     updateSourceLabel();
-    m_fromBlob.clear();
+    m_loadingModel.clear();
+    m_loadJob.clear();
     m_createBtn->setVisible(true);
     m_updateBtn->setVisible(false);
     m_nameEdit->setReadOnly(false);
@@ -895,11 +925,26 @@ void ModelEditorWidget::loadRepo(const RepoGroup &group)
 
 void ModelEditorWidget::loadModel(const QString &modelName)
 {
-    OllamaCli::ModelParams params = m_cli->showModel(modelName);
+    // `ollama show` takes a round trip to the daemon (and may hang with it):
+    // never on the UI thread. The form keeps the previous model until the
+    // reply arrives, and m_currentEditModel still names that model.
+    m_loadingModel = modelName;
+    m_statusLabel->setText(T("editor.statusLoading").arg(modelName));
+    OllamaJob *job = m_cli->showModelAsync(modelName);
+    m_loadJob = job;
+    connect(job, &OllamaJob::finished, this, [this, job, modelName](bool ok, const QString &) {
+        // Only the latest selection is applied; create mode drops it.
+        if (job != m_loadJob)
+            return;
+        m_loadJob.clear();
+        m_loadingModel.clear();
+        applyLoadedModel(modelName, ok ? job->params() : OllamaCli::ModelParams());
+    });
+}
 
-    m_fromBlob = m_cli->getModelFromBlob(modelName);
-    QString realFrom = m_cli->findOtherModelSharingBlob(m_fromBlob, modelName);
-
+void ModelEditorWidget::applyLoadedModel(const QString &modelName,
+                                         const OllamaCli::ModelParams &params)
+{
     if (params.architecture.isEmpty()) {
         m_statusLabel->setText(T("editor.statusLoadError").arg(modelName));
         m_defaultCtxLabel->clear();
@@ -908,12 +953,7 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     }
 
     m_fromCombo->blockSignals(true);
-    QString baseFrom = modelName;
-    if (baseFrom.isEmpty()) {
-        if (!params.fromBase.isEmpty())      baseFrom = params.fromBase;
-        else if (!realFrom.isEmpty())        baseFrom = realFrom;
-        else                                 baseFrom = m_fromBlob;
-    }
+    const QString baseFrom = modelName.isEmpty() ? params.fromBase : modelName;
     if (!baseFrom.isEmpty()) {
         int idx = m_fromCombo->findData(baseFrom);
         if (idx < 0)
@@ -933,38 +973,38 @@ void ModelEditorWidget::loadModel(const QString &modelName)
 
     m_numCtxCheck->setChecked(params.parameters.contains("num_ctx"));
     if (params.parameters.contains("num_ctx")) {
-        int wantK = qRound(params.parameters["num_ctx"].toInt() / 1024.0);
+        int wantK = qRound(params.parameters.value("num_ctx").toInt() / 1024.0);
         m_numCtxSpin->setValue(wantK);
         tokens::setRole(m_numCtxSpin, wantK > maxK ? "danger" : "");
     }
 
     m_tempCheck->setChecked(params.parameters.contains("temperature"));
     if (params.parameters.contains("temperature"))
-        m_tempSpin->setValue(params.parameters["temperature"].toDouble());
+        m_tempSpin->setValue(params.parameters.value("temperature").toDouble());
 
     m_topPCheck->setChecked(params.parameters.contains("top_p"));
     if (params.parameters.contains("top_p"))
-        m_topPSpin->setValue(params.parameters["top_p"].toDouble());
+        m_topPSpin->setValue(params.parameters.value("top_p").toDouble());
 
     m_topKCheck->setChecked(params.parameters.contains("top_k"));
     if (params.parameters.contains("top_k"))
-        m_topKSpin->setValue(params.parameters["top_k"].toInt());
+        m_topKSpin->setValue(params.parameters.value("top_k").toInt());
 
     m_repeatPenaltyCheck->setChecked(params.parameters.contains("repeat_penalty"));
     if (params.parameters.contains("repeat_penalty"))
-        m_repeatPenaltySpin->setValue(params.parameters["repeat_penalty"].toDouble());
+        m_repeatPenaltySpin->setValue(params.parameters.value("repeat_penalty").toDouble());
 
     m_repeatLastNCheck->setChecked(params.parameters.contains("repeat_last_n"));
     if (params.parameters.contains("repeat_last_n"))
-        m_repeatLastNSpin->setValue(params.parameters["repeat_last_n"].toInt());
+        m_repeatLastNSpin->setValue(params.parameters.value("repeat_last_n").toInt());
 
     m_presencePenaltyCheck->setChecked(params.parameters.contains("presence_penalty"));
     if (params.parameters.contains("presence_penalty"))
-        m_presencePenaltySpin->setValue(params.parameters["presence_penalty"].toDouble());
+        m_presencePenaltySpin->setValue(params.parameters.value("presence_penalty").toDouble());
 
     m_frequencyPenaltyCheck->setChecked(params.parameters.contains("frequency_penalty"));
     if (params.parameters.contains("frequency_penalty"))
-        m_frequencyPenaltySpin->setValue(params.parameters["frequency_penalty"].toDouble());
+        m_frequencyPenaltySpin->setValue(params.parameters.value("frequency_penalty").toDouble());
 
     bool hasSystem = !params.systemPrompt.isEmpty();
     m_systemPromptCheck->setChecked(hasSystem);
@@ -1004,7 +1044,11 @@ void ModelEditorWidget::loadModel(const QString &modelName)
     }
     m_modelInfoLabel->setText(info.join(QStringLiteral("  ·  ")));
 
-    updateContextInfo(currentFromName(), params.contextLength);
+    const QString from = currentFromName();
+    if (from.isEmpty() || from == modelName)
+        applyContextInfo(params, params.contextLength);
+    else
+        requestBaseContext(from);
 
     m_statusLabel->setText(T("editor.statusLoaded")
         .arg(modelName, params.architecture, params.paramCount));
@@ -1022,10 +1066,24 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_baseMaxContext = 32768;
         m_numCtxSlider->setMaximum(1024);
         m_numCtxSpin->setMaximum(1024);
+        m_ctxBase.clear();
+        m_ctxJob.clear();
+        m_ctxTimer->stop();
         return;
     }
 
-    int maxCtx = maxContextForBase(label);
+    requestBaseContext(label);
+}
+
+void ModelEditorWidget::requestBaseContext(const QString &baseModel)
+{
+    m_ctxBase = baseModel;
+    m_ctxTimer->start();
+}
+
+void ModelEditorWidget::applyBaseContext(bool ok, const OllamaCli::ModelParams &params)
+{
+    const int maxCtx = ok ? params.contextLength : 0;
     if (maxCtx > 0) {
         m_baseMaxContext = maxCtx;
         m_numCtxSlider->setMaximum(maxCtx / 1024);
@@ -1040,7 +1098,7 @@ void ModelEditorWidget::onFromChanged(const QString &baseModel)
         m_numCtxSpin->setMaximum(1024);
     }
 
-    updateContextInfo(label, maxCtx);
+    applyContextInfo(ok ? params : OllamaCli::ModelParams(), maxCtx);
 }
 
 void ModelEditorWidget::onNumCtxChanged(int value)
@@ -1056,7 +1114,9 @@ void ModelEditorWidget::onPreview()
         QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnFrom"));
         return;
     }
-    QString content = ModelfileBuilder::build(config);
+    QString content;
+    if (!buildModelfile(config, &content))
+        return;
     QMessageBox msgBox(this);
     msgBox.setWindowTitle(T("editor.previewTitle"));
     msgBox.setText(content);
@@ -1081,7 +1141,9 @@ void ModelEditorWidget::onCreate()
         QMessageBox::warning(this, T("editor.warnTitle"), T("editor.warnName"));
         return;
     }
-    QString content = ModelfileBuilder::build(config);
+    QString content;
+    if (!buildModelfile(config, &content))
+        return;
     emit createRequested(name, content);
 }
 
@@ -1116,13 +1178,28 @@ void ModelEditorWidget::onUpdate()
         // After the rename the old name is gone: the Modelfile must use the new
         // one, otherwise `ollama create` would have nothing to inherit from.
         config.from = name;
-        const QString content = ModelfileBuilder::build(config);
+        QString content;
+        if (!buildModelfile(config, &content))
+            return;
         emit renameAndUpdateRequested(m_currentEditModel, name, content);
         return;
     }
 
-    QString content = ModelfileBuilder::build(config);
+    QString content;
+    if (!buildModelfile(config, &content))
+        return;
     emit updateRequested(name, content);
+}
+
+bool ModelEditorWidget::buildModelfile(const ModelfileBuilder::Config &config, QString *content)
+{
+    QString directive;
+    *content = ModelfileBuilder::build(config, &directive);
+    if (!directive.isEmpty()) {
+        QMessageBox::warning(this, T("editor.warnTitle"), T("editor.tripleQuotes").arg(directive));
+        return false;
+    }
+    return true;
 }
 
 ModelfileBuilder::Config ModelEditorWidget::collectConfig()
@@ -1177,23 +1254,12 @@ void ModelEditorWidget::clearForm()
     m_systemPromptEdit->clear();
 }
 
-int ModelEditorWidget::maxContextForBase(const QString &baseModel)
+void ModelEditorWidget::applyContextInfo(const OllamaCli::ModelParams &params,
+                                         int loadedContextLength)
 {
-    OllamaCli::ModelParams params = m_cli->showModel(baseModel);
-    return params.contextLength;
-}
-
-void ModelEditorWidget::updateContextInfo(const QString &baseModel, int loadedContextLength)
-{
-    if (baseModel.isEmpty()) {
-        m_defaultCtxLabel->clear();
-        return;
-    }
-
-    OllamaCli::ModelParams params = m_cli->showModel(baseModel);
     int defaultCtx = 2048;
     if (params.parameters.contains("num_ctx")) {
-        defaultCtx = params.parameters["num_ctx"].toInt();
+        defaultCtx = params.parameters.value("num_ctx").toInt();
     }
     setDefaultCtxLabel(defaultCtx);
 

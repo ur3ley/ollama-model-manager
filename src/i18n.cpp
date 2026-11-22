@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QTextStream>
 #include <QDebug>
+#include <utility>
 
 I18n *I18n::instance()
 {
@@ -50,7 +51,7 @@ bool I18n::setLanguage(const QString &code)
                  qPrintable(m_dir + "/" + code + ".ini"));
         return false;
     }
-    m_current = map;
+    m_current = std::move(map);
     m_code = code;
     emit languageChanged();
     return true;

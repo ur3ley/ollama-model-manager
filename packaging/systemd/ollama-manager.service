@@ -1,6 +1,6 @@
 [Unit]
 Description=Ollama Model Manager (auth proxy, headless)
-Documentation=man:ollama-model-manager(1)
+Documentation=https://github.com/ur3ley/ollama-model-manager/blob/master/docs/proxy.md
 After=network.target
 # Restart=on-failure без StartLimit* зацикливал бы падения бесконечно.
 StartLimitIntervalSec=60

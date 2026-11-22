@@ -7,6 +7,9 @@
 #include "provenance.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QTextStream>
 
 namespace {
@@ -54,6 +57,36 @@ int main(int argc, char *argv[])
 
     store.remove(QStringLiteral("qwen3:8b"));
     check(!store.contains(QStringLiteral("qwen3:8b")), QStringLiteral("entry removed"));
+
+    // A-4: one-time move of models.json from the old AppConfigLocation.
+    {
+        QTemporaryDir tmp;
+        const QString from = tmp.filePath(QStringLiteral("old/models.json"));
+        const QString to = tmp.filePath(QStringLiteral("new/models.json"));
+        QDir().mkpath(tmp.filePath(QStringLiteral("old")));
+        QFile legacy(from);
+        check(legacy.open(QIODevice::WriteOnly), QStringLiteral("migrate: fixture written"));
+        legacy.write("{\"m:1\":{\"source\":\"ollama\",\"ref\":\"m:1\"}}");
+        legacy.close();
+
+        check(Provenance::migrateLegacy(from, to), QStringLiteral("migrate: legacy file moved"));
+        check(!QFile::exists(from) && QFile::exists(to),
+              QStringLiteral("migrate: source gone, target present"));
+        check((QFile::permissions(to) & (QFileDevice::ReadGroup | QFileDevice::ReadOther)) == 0,
+              QStringLiteral("migrate: target is owner-only"));
+
+        QFile again(from);
+        check(again.open(QIODevice::WriteOnly), QStringLiteral("migrate: second fixture written"));
+        again.write("{}");
+        again.close();
+        check(!Provenance::migrateLegacy(from, to),
+              QStringLiteral("migrate: existing target is never overwritten"));
+        QFile target(to);
+        check(target.open(QIODevice::ReadOnly) && target.readAll().contains("m:1"), QStringLiteral("migrate: target content kept"));
+        check(!Provenance::migrateLegacy(to, to), QStringLiteral("migrate: same path is a no-op"));
+    }
+    check(Provenance::storePath().endsWith(QLatin1String("/ollama-manager/models.json")),
+          QStringLiteral("store lives in ~/.config/ollama-manager"));
 
     QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n"
                                             : "FAILURES: " + QString::number(g_failures) + "\n");

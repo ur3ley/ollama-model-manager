@@ -4,8 +4,10 @@
 #include "ollamaproxy.h"
 #include "tokenmap.h"
 
+#include <QEventLoop>
 #include <QHostAddress>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 
@@ -30,17 +32,48 @@ QString formatDate(const QDateTime &date)
     return date.toLocalTime().toString(QStringLiteral("yyyy-MM-dd"));
 }
 
+/**
+ * Выполняет fn в отдельном потоке, не замораживая GUI (S-10): openssl
+ * генерирует RSA-4096 секундами. Пользовательский ввод на это время
+ * исключён из цикла — повторно в ProxyService::start() не войти кликом.
+ */
+template <typename F>
+auto runOffThread(F fn) -> decltype(fn())
+{
+    decltype(fn()) result{};
+    QEventLoop loop;
+    QThread *worker = QThread::create([&result, &fn] { result = fn(); });
+    QObject::connect(worker, &QThread::finished, &loop, &QEventLoop::quit);
+    worker->start();
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+    worker->wait();
+    delete worker;
+    return result;
+}
+
 } // namespace
+
+template <typename F>
+void ProxyService::callProxy(F &&fn)
+{
+    QMetaObject::invokeMethod(m_proxy, std::forward<F>(fn), Qt::BlockingQueuedConnection);
+}
 
 ProxyService::ProxyService(TokenManager *tokens, QObject *parent)
     : QObject(parent)
     , m_tokens(tokens)
-    , m_proxy(new OllamaProxy(this))
+    , m_proxyThread(new QThread(this))
+    , m_proxy(new OllamaProxy)
     , m_timer(new QTimer(this))
     , m_certTimer(new QTimer(this))
     , m_tls(new TlsManager(this))
     , m_settings(ProxySettings::load())
 {
+    m_proxyThread->setObjectName(QStringLiteral("ollama-proxy"));
+    m_proxy->moveToThread(m_proxyThread);
+    connect(m_proxyThread, &QThread::finished, m_proxy, &QObject::deleteLater);
+    m_proxyThread->start();
+
     m_timer->setInterval(60 * 1000);
     connect(m_timer, &QTimer::timeout, this, &ProxyService::reloadTokens);
 
@@ -66,7 +99,15 @@ ProxyService::ProxyService(TokenManager *tokens, QObject *parent)
     connect(m_proxy, &OllamaProxy::proxyError, this, &ProxyService::logMessage);
 }
 
-ProxyService::~ProxyService() = default;
+ProxyService::~ProxyService()
+{
+    // Сокеты закрываются в своём потоке, затем поток гасится и забирает прокси.
+    if (m_proxyThread->isRunning()) {
+        callProxy([this] { m_proxy->stop(); });
+        m_proxyThread->quit();
+        m_proxyThread->wait();
+    }
+}
 
 bool ProxyService::fail(const QString &message, QString *error)
 {
@@ -111,12 +152,29 @@ TlsManager::TlsMaterial ProxyService::prepareTls(QString *error)
 
     QString dnsName;
     if (m_settings.tls == ProxySettings::TlsMode::Internal) {
-        // OPNsense обращается по имени из endpoint() — оно должно быть в SAN.
-        dnsName = QUrl(TokenManager::endpoint()).host();
+        // OPNsense обращается по имени из public_url — оно должно быть в SAN.
+        dnsName = m_settings.publicDnsName();
     }
 
-    TlsManager::TlsMaterial material =
-        m_tls->ensure(m_settings.tls, sanAddresses(), dnsName, error);
+    // checkCertificate() по таймеру может прийти, пока идёт генерация.
+    if (m_tlsBusy) {
+        TlsManager::TlsMaterial busy;
+        busy.error = QStringLiteral("TLS material is being generated");
+        if (error)
+            *error = busy.error;
+        return busy;
+    }
+    m_tlsBusy = true;
+    const ProxySettings::TlsMode mode = m_settings.tls;
+    const QStringList san = sanAddresses();
+    QString threadError;
+    TlsManager *tls = m_tls;
+    TlsManager::TlsMaterial material = runOffThread([tls, mode, san, dnsName, &threadError] {
+        return tls->ensure(mode, san, dnsName, &threadError);
+    });
+    m_tlsBusy = false;
+    if (error && !threadError.isEmpty())
+        *error = threadError;
     if (material.ok) {
         m_tlsError.clear();
         if (material.expires.isValid())
@@ -187,9 +245,19 @@ bool ProxyService::start(const ProxySettings &settings, QString *error)
     config.tlsEnabled = m_settings.tls != ProxySettings::TlsMode::Off;
     config.tlsCertPath = material.certPath;
     config.tlsKeyPath = material.keyPath;
+    config.restrictAdminApi = m_settings.restrictAdminApi;
 
     QString proxyError;
-    if (!m_proxy->start(config, &proxyError)) {
+    bool started = false;
+    callProxy([&] {
+        started = m_proxy->start(config, &proxyError);
+        m_proxyTls = m_proxy->isTls();
+        m_endpoints = m_proxy->boundEndpoints();
+    });
+    m_running = started;
+    if (!started) {
+        m_proxyTls = false;
+        m_endpoints.clear();
         return fail(T("proxy.errBind").arg(proxyError), error);
     }
 
@@ -201,8 +269,18 @@ bool ProxyService::start(const ProxySettings &settings, QString *error)
         m_certTimer->start();
     }
 
-    emit logMessage(T("proxy.logStarted").arg(m_proxy->boundEndpoints().join(QStringLiteral(", "))));
-    if (m_proxy->isTls()) {
+    emit logMessage(T("proxy.logStarted").arg(m_endpoints.join(QStringLiteral(", "))));
+    // admin_api=restricted по умолчанию (2026-11-22): в журнале сразу видно,
+    // что токены без флага «Админ» не могут pull/create/delete.
+    if (m_settings.restrictAdminApi) {
+        if (m_settings.adminApiImplicit)
+            emit logMessage(T("proxy.logAdminDefault"));
+        emit logMessage(T("proxy.logAdminRestricted").arg(m_adminCount).arg(m_tokenCount));
+    }
+    // Разрешённая, но опасная конфигурация: не запрещаем, а предупреждаем (S-5).
+    if (m_settings.plaintextOnNetwork())
+        emit logMessage(T("proxy.logPlaintextLan"));
+    if (m_proxyTls) {
         if (m_certExpiry.isValid())
             emit logMessage(T("proxy.logTlsExpiry").arg(formatDate(m_certExpiry)));
         emit tlsChanged(m_certExpiry);
@@ -217,7 +295,10 @@ void ProxyService::stop()
     const bool wasRunning = isRunning();
     m_timer->stop();
     m_certTimer->stop();
-    m_proxy->stop();
+    callProxy([this] { m_proxy->stop(); });
+    m_running = false;
+    m_proxyTls = false;
+    m_endpoints.clear();
     m_tokenCount = 0;
 
     if (wasRunning)
@@ -339,10 +420,13 @@ void ProxyService::reloadTokens()
     m_lastTokenLog.clear();
 
     QList<QPair<QByteArray, QString>> tokens;
+    QSet<QString> admins;
     tokens.reserve(entries.size());
     for (TokenManager::Entry &entry : entries) {
         if (entry.token.isEmpty() || entry.device.isEmpty())
             continue;
+        if (entry.admin)
+            admins.insert(entry.device);
         // toUtf8() — временная копия секрета в куче; затираем и её, и
         // QString-копию из кошелька, чтобы они не дожили до core dump (L-3).
         QByteArray token = entry.token.toUtf8();
@@ -351,14 +435,18 @@ void ProxyService::reloadTokens()
     }
 
     TokenMap map;
-    map.setTokens(tokens);
+    map.setTokens(tokens, admins);
     for (auto &pair : tokens)
         pair.first.fill('\0');
     tokens.clear();
     QList<TokenManager::Entry>().swap(entries);
 
-    m_proxy->setTokenMap(map);
+    // Карта уходит в поток прокси копией; применится до следующего запроса.
+    OllamaProxy *proxy = m_proxy;
+    QMetaObject::invokeMethod(m_proxy, [proxy, map] { proxy->setTokenMap(map); },
+                              Qt::QueuedConnection);
 
+    m_adminCount = int(admins.size());
     if (m_tokenCount != map.size()) {
         m_tokenCount = map.size();
         emit statusChanged();
@@ -367,25 +455,24 @@ void ProxyService::reloadTokens()
 
 bool ProxyService::isRunning() const
 {
-    return m_proxy->isRunning();
+    return m_running;
 }
 
 bool ProxyService::isTls() const
 {
-    return m_proxy->isTls();
+    return m_proxyTls;
 }
 
 QString ProxyService::statusText() const
 {
     if (isRunning()) {
-        if (m_proxy->isTls()) {
+        if (m_proxyTls) {
             return T("proxy.statusRunningTls")
-                .arg(m_proxy->boundEndpoints().join(QStringLiteral(", ")))
-                .arg(formatDate(m_certExpiry))
+                .arg(m_endpoints.join(QStringLiteral(", ")), formatDate(m_certExpiry))
                 .arg(m_tokenCount);
         }
         return T("proxy.statusRunning")
-            .arg(m_proxy->boundEndpoints().join(QStringLiteral(", ")))
+            .arg(m_endpoints.join(QStringLiteral(", ")))
             .arg(m_tokenCount);
     }
     if (!m_settings.enabled)

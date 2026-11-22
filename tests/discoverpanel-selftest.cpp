@@ -7,6 +7,8 @@
 //   QT_QPA_PLATFORM=offscreen ./discoverpanel-selftest --pull qwen3:0.6b
 
 #include "discoverpanel.h"
+#include "provenance.h"
+#include "installservice.h"
 #include "i18n.h"
 #include "ollamacli.h"
 
@@ -56,6 +58,7 @@ int main(int argc, char *argv[])
     i18n->setLanguage(QStringLiteral("en"));
 
     OllamaCli cli;
+    InstallService install(&cli, &Provenance::instance());
 
     if (argc > 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--pull")) {
         const QString name = QString::fromLocal8Bit(argv[2]);
@@ -66,7 +69,8 @@ int main(int argc, char *argv[])
         int progressLines = 0;
         int lastPercent = -2;
         bool monotonic = true;
-        QObject::connect(&cli, &OllamaCli::pullProgress, &app,
+        OllamaJob *job = cli.pullModelAsync(name, expected);
+        QObject::connect(job, &OllamaJob::progress, &app,
                          [&](const QString &label, int percent, qint64 received, qint64 total) {
             ++progressLines;
             if (percent >= 0 && lastPercent >= 0 && percent < lastPercent)
@@ -76,14 +80,13 @@ int main(int argc, char *argv[])
                 QTextStream(stdout) << "  [" << percent << "%] " << (received >> 20)
                                     << " MB / " << (total >> 20) << " MB (" << label << ")\n";
         });
-        QObject::connect(&cli, &OllamaCli::pullFinished, &app,
+        QObject::connect(job, &OllamaJob::finished, &app,
                          [&](bool success, const QString &output) {
             finished = true;
             ok = success;
             if (!success)
                 QTextStream(stdout) << "output: " << output << "\n";
         });
-        cli.pullModelAsync(name, expected);
         if (!waitFor([&] { return finished; }, 600000)) {
             QTextStream(stdout) << "FAIL pull timed out\n";
             return 1;
@@ -100,7 +103,7 @@ int main(int argc, char *argv[])
         const QString query = QString::fromLocal8Bit(argv[2]);
         const QString shot = QString::fromLocal8Bit(argv[3]);
 
-        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &cli);
+        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &install);
         ollama.resize(1000, 700);
         ollama.show();
         ollama.searchAs(query);
@@ -121,7 +124,7 @@ int main(int argc, char *argv[])
                             << ", suggested: " << ollama.suggestedName() << "\n"
                             << (savedOllama ? "saved ollama\n" : "save ollama failed\n");
 
-        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &cli);
+        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &install);
         hf.resize(1000, 700);
         hf.show();
         hf.searchAs(QString());
@@ -141,8 +144,8 @@ int main(int argc, char *argv[])
     }
 
     {
-        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &cli);
-        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &cli);
+        DiscoverPanel ollama(DiscoverPanel::Source::Ollama, &install);
+        DiscoverPanel hf(DiscoverPanel::Source::HuggingFace, &install);
         check(ollama.modelCount() == 0, QStringLiteral("ollama panel starts empty"));
         check(hf.modelCount() == 0, QStringLiteral("hf panel starts empty"));
         check(ollama.suggestedName().isEmpty(), QStringLiteral("nothing selected"));

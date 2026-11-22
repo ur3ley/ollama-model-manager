@@ -15,17 +15,21 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QFormLayout>
+#include <QTimer>
+#include <QPointer>
 #include "ollamacli.h"
 #include "modelfilebuilder.h"
 #include "i18n.h"
 #include "registryclient.h"
 #include "repogroup.h"
 
+class InstallService;
+
 class ModelEditorWidget : public QWidget
 {
     Q_OBJECT
 public:
-    explicit ModelEditorWidget(OllamaCli *cli, QWidget *parent = nullptr);
+    explicit ModelEditorWidget(InstallService *install, QWidget *parent = nullptr);
 
     /** Edit an installed repository: FROM = its installed quants. */
     void loadRepo(const RepoGroup &group);
@@ -65,8 +69,11 @@ private:
     void clearForm();
     void updateCapabilities(const OllamaCli::ModelParams &params);
     void updateTemplateInfo(const OllamaCli::ModelParams &params);
-    int maxContextForBase(const QString &baseModel);
-    void updateContextInfo(const QString &baseModel, int loadedContextLength);
+    void applyLoadedModel(const QString &modelName, const OllamaCli::ModelParams &params);
+    void applyBaseContext(bool ok, const OllamaCli::ModelParams &params);
+    void applyContextInfo(const OllamaCli::ModelParams &params, int loadedContextLength);
+    void requestBaseContext(const QString &baseModel);
+    bool buildModelfile(const ModelfileBuilder::Config &config, QString *content);
     void setDefaultCtxLabel(int defaultCtx);
     void setMaxCtxLabel(int maxCtx);
     void toggleParamEnabled(QCheckBox *check, QWidget *widget);
@@ -76,7 +83,7 @@ private:
     void requestFamilyTags();
     void onFamilyTags(bool ok, const QList<RegistryClient::Tag> &tags, const QString &error);
     void onFromActivated(int index);
-    void onFromContextMenu(const QPoint &pos);
+    void onFromContextMenu(QPoint pos);
     bool selectedFromInstalled() const;
     void updateModelButtons();
     void updateDeleteQuantState();
@@ -87,6 +94,7 @@ private:
     void updateSourceLabel();
     void applyRepoModeToFrom();
 
+    InstallService *m_install;
     OllamaCli *m_cli;
 
     QLabel *m_titleLabel;
@@ -108,7 +116,7 @@ private:
     QString m_family;
     QString m_modelStem;
     QStringList m_localModels;
-    QString m_pendingInstall;
+    QPointer<OllamaJob> m_installJob;  // our quant pull (A-1: no name matching)
     QComboBox *m_fromCombo;
     QWidget *m_fromRowWidget = nullptr;
     QToolButton *m_deleteQuantBtn = nullptr;
@@ -152,7 +160,13 @@ private:
     RepoGroup m_repo;
     QStringList m_capabilities;
     bool m_templateSoftSwitch = false;
-    QString m_fromBlob;  // direct blob path for updates, bypasses inheritance
+    // `ollama show` runs asynchronously: the names whose replies are awaited.
+    // A reply for any other name is stale (the user moved on) and is dropped.
+    QString m_loadingModel;
+    QString m_ctxBase;
+    QPointer<OllamaJob> m_loadJob;  // `ollama show` of the selected model
+    QPointer<OllamaJob> m_ctxJob;   // `ollama show` of the FROM base
+    QTimer *m_ctxTimer = nullptr;
     int m_baseMaxContext = 32768;
 };
 

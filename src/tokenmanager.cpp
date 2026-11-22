@@ -8,16 +8,26 @@
 
 #include <kwallet.h>
 
+#include "walletopen.h"
+
 #include <utility>
 
 namespace {
 const char *kWalletName = "kdewallet";
 const char *kFolder = "ollama-auth";
 const char *kCreatedPrefix = "created:";
+// "admin:<device>" = "1": токен может вызывать административный API (S-3).
+const char *kAdminPrefix = "admin:";
 } // namespace
 
 TokenManager::TokenManager(QObject *parent)
+    : TokenManager(walletFolder(), parent)
+{
+}
+
+TokenManager::TokenManager(const QString &folder, QObject *parent)
     : QObject(parent)
+    , m_folder(folder.isEmpty() ? walletFolder() : folder)
 {
 }
 
@@ -36,11 +46,6 @@ QString TokenManager::walletName()
 QString TokenManager::walletFolder()
 {
     return QString::fromLatin1(kFolder);
-}
-
-QString TokenManager::endpoint()
-{
-    return QStringLiteral("https://ollama.example.org");
 }
 
 QString TokenManager::generateToken()
@@ -91,7 +96,17 @@ bool TokenManager::ensureWallet(QString *error)
     }
 
     if (!m_wallet) {
-        m_wallet = KWallet::Wallet::openWallet(walletName(), 0, KWallet::Wallet::Synchronous);
+        // Асинхронно, с локальным циклом (S-10): окно не замирает на время
+        // запроса пароля. Таймер reloadTokens может сработать внутри этого
+        // цикла — повторно кошелёк не открываем.
+        if (m_opening) {
+            if (error)
+                *error = QStringLiteral("wallet '%1' is being opened").arg(walletName());
+            return false;
+        }
+        m_opening = true;
+        m_wallet = walletopen::open(walletName());
+        m_opening = false;
         if (!m_wallet) {
             if (error)
                 *error = QStringLiteral("cannot open wallet '%1'").arg(walletName());
@@ -105,14 +120,14 @@ bool TokenManager::ensureWallet(QString *error)
         return false;
     }
 
-    if (!m_wallet->hasFolder(walletFolder()) && !m_wallet->createFolder(walletFolder())) {
+    if (!m_wallet->hasFolder(m_folder) && !m_wallet->createFolder(m_folder)) {
         if (error)
-            *error = QStringLiteral("cannot create folder '%1' in wallet").arg(walletFolder());
+            *error = QStringLiteral("cannot create folder '%1' in wallet").arg(m_folder);
         return false;
     }
-    if (!m_wallet->setFolder(walletFolder())) {
+    if (!m_wallet->setFolder(m_folder)) {
         if (error)
-            *error = QStringLiteral("cannot open folder '%1' in wallet").arg(walletFolder());
+            *error = QStringLiteral("cannot open folder '%1' in wallet").arg(m_folder);
         return false;
     }
     return true;
@@ -128,7 +143,8 @@ QList<TokenManager::Entry> TokenManager::entries(QString *error)
     QStringList devices;
     int skipped = 0;
     for (const QString &key : keys) {
-        if (key.startsWith(QString::fromLatin1(kCreatedPrefix)))
+        if (key.startsWith(QString::fromLatin1(kCreatedPrefix))
+            || key.startsWith(QString::fromLatin1(kAdminPrefix)))
             continue;
         // В папку может попасть что угодно (старый скрипт, другой инструмент,
         // импорт). Имя уходит в заголовок и в журнал — валидируем при загрузке,
@@ -143,15 +159,19 @@ QList<TokenManager::Entry> TokenManager::entries(QString *error)
     if (skipped > 0) {
         qWarning().noquote() << QStringLiteral("wallet '%1': пропущено %2 записей с недопустимым "
                                                "именем устройства")
-                                    .arg(walletFolder())
+                                    .arg(m_folder)
                                     .arg(skipped);
     }
 
-    for (const QString &device : devices) {
+    for (const QString &device : std::as_const(devices)) {
         Entry entry;
         entry.device = device;
         m_wallet->readPassword(device, entry.token);
         m_wallet->readPassword(QString::fromLatin1(kCreatedPrefix) + device, entry.created);
+        QString admin;
+        if (m_wallet->hasEntry(QString::fromLatin1(kAdminPrefix) + device)
+            && m_wallet->readPassword(QString::fromLatin1(kAdminPrefix) + device, admin) == 0)
+            entry.admin = admin == QLatin1String("1");
         result << entry;
     }
     return result;
@@ -201,6 +221,28 @@ bool TokenManager::revoke(const QString &device, QString *error)
         return false;
     }
     m_wallet->removeEntry(QString::fromLatin1(kCreatedPrefix) + device);
+    m_wallet->removeEntry(QString::fromLatin1(kAdminPrefix) + device);
+    emit tokensChanged();
+    return true;
+}
+
+bool TokenManager::setAdmin(const QString &device, bool admin, QString *error)
+{
+    if (!ensureWallet(error))
+        return false;
+    if (!m_wallet->hasEntry(device)) {
+        if (error)
+            *error = QStringLiteral("no token for '%1'").arg(device);
+        return false;
+    }
+    const QString key = QString::fromLatin1(kAdminPrefix) + device;
+    const int rc = admin ? m_wallet->writePassword(key, QStringLiteral("1"))
+                         : (m_wallet->hasEntry(key) ? m_wallet->removeEntry(key) : 0);
+    if (rc != 0) {
+        if (error)
+            *error = QStringLiteral("cannot update admin flag in wallet");
+        return false;
+    }
     emit tokensChanged();
     return true;
 }
@@ -222,5 +264,17 @@ bool TokenManager::token(const QString &device, QString *value, QString *error)
     }
     if (value)
         *value = std::move(result);
+    return true;
+}
+
+bool TokenManager::removeFolder(QString *error)
+{
+    if (!ensureWallet(error))
+        return false;
+    if (!m_wallet->removeFolder(m_folder)) {
+        if (error)
+            *error = QStringLiteral("cannot remove folder '%1' from wallet").arg(m_folder);
+        return false;
+    }
     return true;
 }

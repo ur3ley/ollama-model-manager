@@ -197,6 +197,7 @@ private:
  */
 class BudgetedServer : public QTcpServer
 {
+    Q_OBJECT
 public:
     BudgetedServer(std::shared_ptr<ConnectionBudget> budget, QObject *parent)
         : QTcpServer(parent), m_budget(std::move(budget))
@@ -236,6 +237,7 @@ private:
 /** Plain-слушатель: бюджет на accept, ответ 503 сверх лимита. */
 class PlainListener : public BudgetedServer
 {
+    Q_OBJECT
 public:
     PlainListener(std::shared_ptr<ConnectionBudget> budget, QObject *parent)
         : BudgetedServer(std::move(budget), parent)
@@ -272,6 +274,7 @@ protected:
  */
 class TlsListener : public BudgetedServer
 {
+    Q_OBJECT
 public:
     TlsListener(const QSslConfiguration &config, int handshakeTimeoutMs,
                 std::shared_ptr<ConnectionBudget> budget, QObject *parent)
@@ -359,6 +362,7 @@ private:
  */
 class ProxyConnection : public QObject
 {
+    Q_OBJECT
 public:
     ProxyConnection(OllamaProxy *owner, QTcpSocket *client);
     ~ProxyConnection() override;
@@ -745,6 +749,16 @@ void ProxyConnection::handleHead(const QByteArray &head)
     // собраться из чего-то, кроме [A-Za-z0-9._-] (M-3).
     if (m_device.isEmpty() || !deviceNameIsSafe(m_device)) {
         fail(401, "Unauthorized", QByteArrayLiteral("{\"error\":\"unauthorized\"}"));
+        return;
+    }
+
+    // S-3: удалить/создать/скачать модели может только токен с флагом admin.
+    // Отказ попадает в журнал через requestFinished (статус 403 + device).
+    if (m_owner->m_config.restrictAdminApi && !m_owner->m_tokens.isAdmin(m_device)
+        && !isClientApiRequest(m_method, m_path)) {
+        fail(403, "Forbidden",
+             QByteArrayLiteral("{\"error\":\"this token may not use model management "
+                               "endpoints\"}"));
         return;
     }
 
@@ -1185,3 +1199,6 @@ void OllamaProxy::discardConnection(ProxyConnection *conn)
     m_connections.removeAll(conn);
     conn->deleteLater();
 }
+
+// Q_OBJECT classes defined in this file (A-7).
+#include "ollamaproxy.moc"

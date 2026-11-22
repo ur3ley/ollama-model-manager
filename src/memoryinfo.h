@@ -10,6 +10,30 @@
 // what actually matters. Good enough for a green/red hint, not for scheduling.
 namespace memoryinfo {
 
+/** MemTotal and MemAvailable in one read of /proc/meminfo (P-4); 0 when unknown. */
+inline void readMemInfo(quint64 *total, quint64 *available)
+{
+    *total = 0;
+    *available = 0;
+    QFile file(QStringLiteral("/proc/meminfo"));
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    // procfs reports size 0, so atEnd() is unreliable — read everything.
+    const QList<QByteArray> lines = file.readAll().split('\n');
+    for (const QByteArray &line : lines) {
+        quint64 *target = line.startsWith("MemTotal:") ? total
+                : line.startsWith("MemAvailable:") ? available : nullptr;
+        if (!target)
+            continue;
+        const QByteArray digits = line.mid(line.indexOf(':') + 1).trimmed().split(' ').value(0);
+        bool ok = false;
+        const quint64 kb = digits.toULongLong(&ok);
+        *target = ok ? kb * 1024ull : 0;
+        if (*total && *available)
+            return;
+    }
+}
+
 inline quint64 memAvailableBytes()
 {
     QFile file(QStringLiteral("/proc/meminfo"));

@@ -29,7 +29,7 @@ struct HfVariant {
     QList<qint64> sizes;     // bytes per file, same order as `files`
 };
 
-// `model-Q4_K_M-00001-of-00003.gguf` -> `model-Q4_K_M-*.gguf`.
+// `model-Q4_K_M-00001-of-00003.gguf` -> `model-Q4_K_M-?????-of-00003.gguf`.
 //
 // Ollama imports a split GGUF from a wildcard over the original shard names,
 // so the Modelfile needs the base name without the `-0000N-of-0000M` suffix.

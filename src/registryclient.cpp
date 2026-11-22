@@ -1,4 +1,5 @@
 #include "registryclient.h"
+#include "format.h"
 
 #include <QCryptographicHash>
 #include <QRegularExpression>
@@ -6,6 +7,7 @@
 #include <QSet>
 #include <QUrlQuery>
 #include <QtNetwork/QNetworkRequest>
+#include <utility>
 
 namespace {
 
@@ -63,7 +65,7 @@ QString decodeEntities(const QString &input)
     }
     if (last > 0) {
         decoded += text.mid(last);
-        text = decoded;
+        text = std::move(decoded);
     }
     return text;
 }
@@ -76,16 +78,6 @@ QString stripTags(const QString &html)
     return decodeEntities(text).simplified();
 }
 
-QString compactNumber(quint64 value)
-{
-    if (value >= 1000000000ull)
-        return QString::number(value / 1e9, 'f', 1) + QStringLiteral("B");
-    if (value >= 1000000ull)
-        return QString::number(value / 1e6, 'f', 1) + QStringLiteral("M");
-    if (value >= 1000ull)
-        return QString::number(value / 1e3, 'f', 1) + QStringLiteral("K");
-    return QString::number(value);
-}
 
 QStringList capabilitiesIn(const QString &chunk)
 {
@@ -303,7 +295,7 @@ QList<RegistryClient::Model> RegistryClient::parseSearch(const QString &html)
         if (downloadsTitle.hasMatch()) {
             QString digits = downloadsTitle.captured(1);
             digits.remove(QLatin1Char(','));
-            model.pulls = compactNumber(digits.toULongLong());
+            model.pulls = format::compactCount(digits.toULongLong());
         } else {
             const QRegularExpressionMatch pulls = pullsRe.match(chunk);
             if (pulls.hasMatch())

@@ -1,17 +1,37 @@
 #include "ollamacli.h"
 
-#include <QRegularExpression>
+#include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QStandardPaths>
-#include <QFileInfo>
+#include <QTemporaryFile>
 
-OllamaCli::OllamaCli(QObject *parent)
-    : QObject(parent)
+#include <utility>
+
+// ---------------------------------------------------------------- OllamaJob
+
+OllamaJob::OllamaJob(OllamaCli *cli, quint64 id, Kind kind, const QString &name)
+    : QObject(cli)
+    , m_cli(cli)
+    , m_id(id)
+    , m_kind(kind)
+    , m_name(name)
 {
-    m_ollamaPath = QStandardPaths::findExecutable("ollama");
-    if (m_ollamaPath.isEmpty()) {
-        m_ollamaPath = "ollama";
-    }
+}
+
+void OllamaJob::cancel()
+{
+    if (m_kind == Kind::Pull && m_state != State::Finished)
+        m_cli->cancelJob(this);
+}
+
+// ---------------------------------------------------------------- OllamaCli
+
+OllamaCli::OllamaCli(QObject *parent, const QString &ollamaPath)
+    : QObject(parent)
+    , m_ollamaPath(ollamaPath.isEmpty() ? QStandardPaths::findExecutable(QStringLiteral("ollama"))
+                                        : ollamaPath)
+{
 }
 
 bool OllamaCli::isAvailable() const
@@ -24,106 +44,456 @@ QString OllamaCli::ollamaPath() const
     return m_ollamaPath;
 }
 
-QString OllamaCli::runCommand(const QStringList &args, int timeoutMs, bool *ok)
+bool OllamaCli::isValidModelName(const QString &name)
 {
-    QProcess process;
-    process.start(m_ollamaPath, args);
-    if (!process.waitForFinished(timeoutMs)) {
-        if (ok) *ok = false;
-        return process.errorString();
-    }
-    if (ok) *ok = (process.exitCode() == 0);
-    return process.readAllStandardOutput();
+    static const QRegularExpression nameRe(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._:/-]*$"));
+    return name.size() <= 512 && nameRe.match(name).hasMatch();
 }
 
-QList<OllamaCli::ModelInfo> OllamaCli::listModels()
+OllamaJob *OllamaCli::newJob(OllamaJob::Kind kind, const QString &name)
 {
-    QString output = runCommand({"list"});
-    return parseListOutput(output);
+    return new OllamaJob(this, m_nextJobId++, kind, name);
 }
 
-OllamaCli::ModelParams OllamaCli::showModel(const QString &name)
+void OllamaCli::schedule(OllamaJob *job, const QStringList &names, std::function<void()> start)
 {
-    bool ok = false;
-    QString output = runCommand({"show", name}, 30000, &ok);
-    if (!ok) {
-        return ModelParams();
-    }
-    ModelParams params = parseShowOutput(output);
-
-    QString modelfileContent = showModelfile(name);
-    if (!modelfileContent.isEmpty()) {
-        params.fromBase = extractFromBase(modelfileContent);
-        params.templateStr = extractDirective(modelfileContent, QStringLiteral("TEMPLATE"));
-        params.renderer = extractDirective(modelfileContent, QStringLiteral("RENDERER"));
-        params.parser = extractDirective(modelfileContent, QStringLiteral("PARSER"));
-    }
-
-    return params;
+    // Queued even on success: the caller connects to the job after we return.
+    QMetaObject::invokeMethod(job, [this, job, names, start = std::move(start)]() {
+        if (m_ollamaPath.isEmpty()) {
+            finish(job, false, QStringLiteral("ollama not found in PATH"));
+            return;
+        }
+        for (const QString &name : names) {
+            if (!isValidModelName(name)) {
+                finish(job, false, QStringLiteral("invalid model name: \"%1\"").arg(name));
+                return;
+            }
+        }
+        start();
+    }, Qt::QueuedConnection);
 }
 
-QString OllamaCli::showModelfile(const QString &name)
+void OllamaCli::runStep(OllamaJob *job, const QStringList &args, const StepDone &done)
 {
-    bool ok = false;
-    QString output = runCommand({"show", name, "--modelfile"}, 30000, &ok);
-    if (!ok) {
-        return QString();
-    }
-    return output;
+    job->m_state = OllamaJob::State::Running;
+    auto *process = new QProcess(job);
+    job->m_process = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    // A crash also reports finished(CrashExit): only a failed start has no
+    // finished() and is answered from errorOccurred — exactly one result (B-4).
+    connect(process, &QProcess::finished, job,
+            [job, process, done](int exitCode, QProcess::ExitStatus status) {
+        const QString out = QString::fromUtf8(process->readAllStandardOutput());
+        const QString err = QString::fromUtf8(process->readAllStandardError());
+        if (job->m_process == process)
+            job->m_process = nullptr;
+        process->deleteLater();
+        done(exitCode == 0 && status == QProcess::NormalExit, out, err);
+    });
+    connect(process, &QProcess::errorOccurred, job, [job, process, done](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        const QString message = process->errorString();
+        if (job->m_process == process)
+            job->m_process = nullptr;
+        process->deleteLater();
+        done(false, QString(), message);
+    });
+    process->start(m_ollamaPath, args);
 }
 
-void OllamaCli::createModelAsync(const QString &name, const QString &modelfilePath)
+void OllamaCli::finish(OllamaJob *job, bool success, const QString &output)
 {
+    if (job->m_state == OllamaJob::State::Finished)
+        return;
+    job->m_state = OllamaJob::State::Finished;
+    job->m_success = success;
+    job->m_output = output;
+    emit job->finished(success, output);
+    emit jobFinished(job);
+    // The temporary Modelfile goes with the job.
+    job->deleteLater();
+}
+
+void OllamaCli::listModelsAsync()
+{
+    if (m_list) {
+        // The superseded process must stay silent: its finished(CrashExit)
+        // would report a failed list while the new request is still running.
+        disconnect(m_list, nullptr, this, nullptr);
+        m_list->kill();
+        m_list->deleteLater();
+        m_list = nullptr;
+    }
+    if (m_ollamaPath.isEmpty()) {
+        QMetaObject::invokeMethod(this, [this]() {
+            emit modelsListed(false, {}, QStringLiteral("ollama not found in PATH"));
+        }, Qt::QueuedConnection);
+        return;
+    }
+
     auto *process = new QProcess(this);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, process](int exitCode, QProcess::ExitStatus) {
-        bool success = (exitCode == 0);
-        QString output = QString::fromUtf8(process->readAllStandardOutput())
-                       + QString::fromUtf8(process->readAllStandardError());
-        emit createFinished(success, output.trimmed());
+    m_list = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(process, &QProcess::finished, this,
+            [this, process](int exitCode, QProcess::ExitStatus status) {
+        const QString output = QString::fromUtf8(process->readAllStandardOutput());
+        const QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        if (m_list == process)
+            m_list = nullptr;
         process->deleteLater();
+        const bool ok = exitCode == 0 && status == QProcess::NormalExit;
+        emit modelsListed(ok, ok ? parseListOutput(output) : QList<ModelInfo>(), error);
     });
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-        emit createFinished(false, process->errorString());
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        const QString message = process->errorString();
+        if (m_list == process)
+            m_list = nullptr;
         process->deleteLater();
+        emit modelsListed(false, {}, message);
     });
-    process->start(m_ollamaPath, {"create", name, "-f", modelfilePath});
+    process->start(m_ollamaPath, {QStringLiteral("list")});
 }
 
-void OllamaCli::deleteModelAsync(const QString &name)
+OllamaJob *OllamaCli::showModelAsync(const QString &name)
 {
-    auto *process = new QProcess(this);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, process](int exitCode, QProcess::ExitStatus) {
-        bool success = (exitCode == 0);
-        QString output = QString::fromUtf8(process->readAllStandardOutput())
-                       + QString::fromUtf8(process->readAllStandardError());
-        emit deleteFinished(success, output.trimmed());
-        process->deleteLater();
+    OllamaJob *job = newJob(OllamaJob::Kind::Show, name);
+    schedule(job, {name}, [this, job, name]() {
+        runStep(job, {QStringLiteral("show"), name},
+                [this, job, name](bool ok, const QString &out, const QString &err) {
+            if (!ok) {
+                finish(job, false, err.trimmed());
+                return;
+            }
+            job->m_params = parseShowOutput(out);
+            // A failed --modelfile still leaves the `show` details usable.
+            runStep(job, {QStringLiteral("show"), name, QStringLiteral("--modelfile")},
+                    [this, job](bool mfOk, const QString &content, const QString &) {
+                if (mfOk) {
+                    applyModelfile(job->m_params, content);
+                    learnModelsDir(content);
+                }
+                finish(job, true, QString());
+            });
+        });
     });
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-        emit deleteFinished(false, process->errorString());
-        process->deleteLater();
-    });
-    process->start(m_ollamaPath, {"rm", name});
+    return job;
 }
 
-void OllamaCli::copyModelAsync(const QString &oldName, const QString &newName)
+OllamaJob *OllamaCli::createModel(const QString &name, const QString &modelfileContent)
 {
-    auto *process = new QProcess(this);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, process](int exitCode, QProcess::ExitStatus) {
-        bool success = (exitCode == 0);
-        QString output = QString::fromUtf8(process->readAllStandardOutput())
-                       + QString::fromUtf8(process->readAllStandardError());
-        emit copyFinished(success, output.trimmed());
-        process->deleteLater();
+    OllamaJob *job = newJob(OllamaJob::Kind::Create, name);
+    // QTemporaryFile creates the file exclusively (O_EXCL) with mode 0600 under
+    // a random name: no shared predictable path, no symlink or swap race, and
+    // the system prompt is not readable by other local users (S-1). It lives
+    // exactly as long as this job.
+    auto *file = new QTemporaryFile(
+            QDir::temp().filePath(QStringLiteral("ollama-modelfile-XXXXXX.tmp")), job);
+    const QByteArray data = modelfileContent.toUtf8();
+    QString writeError;
+    if (!file->open() || file->write(data) != data.size() || !file->flush())
+        writeError = QStringLiteral("cannot write temporary Modelfile %1: %2")
+                .arg(file->fileName(), file->errorString());
+    file->close();  // the file stays on disk until the job is deleted
+    job->m_modelfile = file;
+
+    schedule(job, {name}, [this, job, name, writeError]() {
+        if (!writeError.isEmpty()) {
+            finish(job, false, writeError);
+            return;
+        }
+        runStep(job, {QStringLiteral("create"), name, QStringLiteral("-f"), job->m_modelfile->fileName()},
+                [this, job](bool ok, const QString &out, const QString &err) {
+            finish(job, ok, (out + err).trimmed());
+        });
     });
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-        emit copyFinished(false, process->errorString());
-        process->deleteLater();
+    return job;
+}
+
+OllamaJob *OllamaCli::deleteModelAsync(const QString &name)
+{
+    OllamaJob *job = newJob(OllamaJob::Kind::Delete, name);
+    schedule(job, {name}, [this, job, name]() {
+        runStep(job, {QStringLiteral("rm"), name},
+                [this, job](bool ok, const QString &out, const QString &err) {
+            finish(job, ok, (out + err).trimmed());
+        });
     });
-    process->start(m_ollamaPath, {"cp", oldName, newName});
+    return job;
+}
+
+OllamaJob *OllamaCli::copyModelAsync(const QString &oldName, const QString &newName)
+{
+    OllamaJob *job = newJob(OllamaJob::Kind::Copy, newName);
+    job->m_source = oldName;
+    schedule(job, {oldName, newName}, [this, job, oldName, newName]() {
+        runStep(job, {QStringLiteral("cp"), oldName, newName},
+                [this, job](bool ok, const QString &out, const QString &err) {
+            finish(job, ok, (out + err).trimmed());
+        });
+    });
+    return job;
+}
+
+OllamaJob *OllamaCli::renameModelAsync(const QString &oldName, const QString &newName)
+{
+    OllamaJob *job = newJob(OllamaJob::Kind::Rename, newName);
+    job->m_source = oldName;
+    schedule(job, {oldName, newName}, [this, job, oldName]() {
+        runStep(job, {QStringLiteral("cp"), job->m_source, job->m_name},
+                [this, job, oldName](bool ok, const QString &out, const QString &err) {
+            if (!ok) {
+                finish(job, false, (out + err).trimmed());
+                return;
+            }
+            runStep(job, {QStringLiteral("rm"), oldName},
+                    [this, job](bool rmOk, const QString &rmOut, const QString &rmErr) {
+                // The copy already exists: a failed `rm` is a partial success,
+                // not a plain failure — the caller must not lose the new name (B-5).
+                job->m_partial = !rmOk;
+                finish(job, rmOk, (rmOut + rmErr).trimmed());
+            });
+        });
+    });
+    return job;
+}
+
+bool OllamaCli::isPulling() const
+{
+    return m_activePull || !m_pullQueue.isEmpty();
+}
+
+OllamaJob *OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
+{
+    OllamaJob *job = newJob(OllamaJob::Kind::Pull, name);
+    job->m_expectedBytes = expectedBytes;
+    m_pullQueue.append(job);
+    schedule(job, {name}, [this]() { startNextPull(); });
+    return job;
+}
+
+void OllamaCli::startNextPull()
+{
+    if (m_activePull)
+        return;
+    while (!m_pullQueue.isEmpty()) {
+        OllamaJob *next = m_pullQueue.takeFirst();
+        if (!next || next->isFinished())
+            continue;
+        startPull(next);
+        return;
+    }
+}
+
+void OllamaCli::startPull(OllamaJob *job)
+{
+    m_activePull = job;
+    job->m_state = OllamaJob::State::Running;
+    job->m_pullParser.reset();
+    job->m_pullParser.setExpectedBytes(job->m_expectedBytes);
+
+    auto *process = new QProcess(job);
+    job->m_process = process;
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(process, &QProcess::readyRead, job, [this, job]() { handlePullOutput(job); });
+    connect(process, &QProcess::finished, job,
+            [this, job, process](int exitCode, QProcess::ExitStatus status) {
+        handlePullOutput(job);
+        // The last line often has no trailing newline ("success").
+        if (!job->m_pullBuffer.trimmed().isEmpty()) {
+            job->m_lastLine = job->m_pullBuffer.trimmed();
+            const PullProgressParser::Update update = job->m_pullParser.feed(job->m_pullBuffer);
+            job->m_pullBuffer.clear();
+            emit job->progress(update.label, update.percent, update.received, update.total);
+        }
+        job->m_process = nullptr;
+        process->deleteLater();
+        const bool ok = exitCode == 0 && status == QProcess::NormalExit && !job->m_cancelled;
+        if (ok) {
+            // Ollama redraws over the last frames, so the biggest layer may end
+            // at 99%: the exit code is what makes the bar full.
+            const PullProgressParser::Update update = job->m_pullParser.markComplete();
+            emit job->progress(update.label, update.percent, update.received, update.total);
+        }
+        if (m_activePull == job)
+            m_activePull = nullptr;
+        finish(job, ok, job->m_cancelled ? QStringLiteral("cancelled") : job->m_lastLine);
+        startNextPull();
+    });
+    connect(process, &QProcess::errorOccurred, job, [this, job, process](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        const QString message = process->errorString();
+        job->m_process = nullptr;
+        process->deleteLater();
+        if (m_activePull == job)
+            m_activePull = nullptr;
+        finish(job, false, message);
+        startNextPull();
+    });
+    process->start(m_ollamaPath, {QStringLiteral("pull"), job->m_name});
+}
+
+void OllamaCli::handlePullOutput(OllamaJob *job)
+{
+    if (!job->m_process)
+        return;
+    job->m_pullBuffer += QString::fromUtf8(job->m_process->readAll());
+    int newline;
+    while ((newline = job->m_pullBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
+        const QString line = job->m_pullBuffer.left(newline);
+        job->m_pullBuffer.remove(0, newline + 1);
+        if (!line.trimmed().isEmpty())
+            job->m_lastLine = line.trimmed();
+        // ANSI escapes and '\r' redraws are handled by the parser.
+        const PullProgressParser::Update update = job->m_pullParser.feed(line);
+        if (update.percent == job->m_lastPercent && update.label == job->m_lastLabel
+                && update.received == job->m_lastReceived)
+            continue;
+        job->m_lastPercent = update.percent;
+        job->m_lastLabel = update.label;
+        job->m_lastReceived = update.received;
+        emit job->progress(update.label, update.percent, update.received, update.total);
+    }
+}
+
+void OllamaCli::cancelJob(OllamaJob *job)
+{
+    job->m_cancelled = true;
+    if (job->m_process) {
+        // finished(CrashExit) follows and reports the cancellation.
+        job->m_process->kill();
+        return;
+    }
+    // Still queued: never started, nothing to kill.
+    m_pullQueue.removeAll(job);
+    finish(job, false, QStringLiteral("cancelled"));
+}
+
+OllamaJob *OllamaCli::blobUsageAsync(const QString &name)
+{
+    OllamaJob *job = newJob(OllamaJob::Kind::BlobUsage, name);
+    schedule(job, {name}, [this, job, name]() {
+        runStep(job, {QStringLiteral("show"), name, QStringLiteral("--modelfile")},
+                [this, job](bool ok, const QString &content, const QString &err) {
+            if (!ok) {
+                finish(job, false, err.trimmed());
+                return;
+            }
+            learnModelsDir(content);
+            job->m_blob = blobFromModelfile(content);
+            if (job->m_blob.isEmpty()) {
+                // FROM a model name, not a blob: nothing is shared on disk.
+                finish(job, true, QString());
+                return;
+            }
+            // Own `ollama list`: the shared one may be replaced by a refresh.
+            runStep(job, {QStringLiteral("list")},
+                    [this, job](bool listOk, const QString &out, const QString &listErr) {
+                if (!listOk) {
+                    finish(job, false, listErr.trimmed());
+                    return;
+                }
+                job->m_pendingModels = parseListOutput(out);
+                inspectNextBlob(job);
+            });
+        });
+    });
+    return job;
+}
+
+void OllamaCli::inspectNextBlob(OllamaJob *job)
+{
+    // Cached ids cost nothing; the first unknown one costs one process.
+    while (!job->m_pendingModels.isEmpty()) {
+        const ModelInfo model = job->m_pendingModels.first();
+        const auto cached = m_blobById.constFind(model.id);
+        if (model.id.isEmpty() || cached == m_blobById.constEnd())
+            break;
+        job->m_pendingModels.removeFirst();
+        if (*cached == job->m_blob)
+            ++job->m_blobRefs;
+    }
+    if (job->m_pendingModels.isEmpty()) {
+        finish(job, true, QString());
+        return;
+    }
+    const ModelInfo model = job->m_pendingModels.takeFirst();
+    if (!isValidModelName(model.name)) {
+        inspectNextBlob(job);
+        return;
+    }
+    runStep(job, {QStringLiteral("show"), model.name, QStringLiteral("--modelfile")},
+            [this, job, model](bool ok, const QString &content, const QString &) {
+        if (ok) {
+            const QString blob = blobFromModelfile(content);
+            if (!model.id.isEmpty())
+                m_blobById.insert(model.id, blob);
+            if (blob == job->m_blob)
+                ++job->m_blobRefs;
+        }
+        inspectNextBlob(job);
+    });
+}
+
+QString OllamaCli::blobFromModelfile(const QString &modelfileContent)
+{
+    // Any storage root: /var/lib/ollama, ~/.ollama/models, $OLLAMA_MODELS (B-8).
+    static const QRegularExpression fromBlobRe(
+        QStringLiteral("^FROM\\s+(/.*/blobs/sha256-[a-f0-9]+)\\s*$"),
+        QRegularExpression::MultilineOption);
+    const QRegularExpressionMatch match = fromBlobRe.match(modelfileContent);
+    return match.hasMatch() ? match.captured(1) : QString();
+}
+
+QString OllamaCli::modelsDirFromBlob(const QString &blobPath)
+{
+    const int at = blobPath.lastIndexOf(QStringLiteral("/blobs/"));
+    return at > 0 ? blobPath.left(at) : QString();
+}
+
+QString OllamaCli::modelsDir() const
+{
+    // Same lookup order as the daemon: explicit OLLAMA_MODELS first. The GUI
+    // usually does not see the service environment, so a root learned from a
+    // real `FROM <blob>` beats the guesses below.
+    const QString env = qEnvironmentVariable("OLLAMA_MODELS").trimmed();
+    if (!env.isEmpty())
+        return env;
+    if (!m_modelsDir.isEmpty())
+        return m_modelsDir;
+    const QStringList candidates = {
+        QStringLiteral("/var/lib/ollama"),                  // distro packages
+        QStringLiteral("/usr/share/ollama/.ollama/models"), // official install.sh
+        QDir::home().filePath(QStringLiteral(".ollama/models")), // `ollama serve` as the user
+    };
+    for (const QString &dir : candidates) {
+        if (QFileInfo(QDir(dir).filePath(QStringLiteral("blobs"))).isDir())
+            return dir;
+    }
+    return QString();
+}
+
+void OllamaCli::learnModelsDir(const QString &modelfileContent)
+{
+    const QString dir = modelsDirFromBlob(blobFromModelfile(modelfileContent));
+    if (!dir.isEmpty())
+        m_modelsDir = dir;
+}
+
+void OllamaCli::applyModelfile(ModelParams &params, const QString &modelfileContent)
+{
+    if (modelfileContent.isEmpty())
+        return;
+    params.fromBase = extractFromBase(modelfileContent);
+    // The Modelfile keeps the prompt verbatim (blank lines, indentation); the
+    // "System" section of plain `ollama show` is re-flowed and lossy.
+    params.systemPrompt = extractDirective(modelfileContent, QStringLiteral("SYSTEM"));
+    params.templateStr = extractDirective(modelfileContent, QStringLiteral("TEMPLATE"));
+    params.renderer = extractDirective(modelfileContent, QStringLiteral("RENDERER"));
+    params.parser = extractDirective(modelfileContent, QStringLiteral("PARSER"));
 }
 
 QList<OllamaCli::ModelInfo> OllamaCli::parseListOutput(const QString &output)
@@ -206,7 +576,7 @@ OllamaCli::ModelParams OllamaCli::parseShowOutput(const QString &output)
         case Parameters: {
             QStringList kv = trimmed.split(kvRe, Qt::SkipEmptyParts);
             if (kv.size() >= 2) {
-                params.parameters[kv[0].trimmed()] = kv[1].trimmed();
+                params.parameters.insert(kv[0].trimmed(), kv[1].trimmed());
             }
             break;
         }
@@ -225,7 +595,8 @@ OllamaCli::ModelParams OllamaCli::parseShowOutput(const QString &output)
 }
 
 QString OllamaCli::extractFromBase(const QString &modelfileContent)
-{    static const QRegularExpression commentFromRe(
+{
+    static const QRegularExpression commentFromRe(
         "^#\\s*FROM\\s+(.+)$", QRegularExpression::MultilineOption);
     QRegularExpressionMatch cmtMatch = commentFromRe.match(modelfileContent);
     if (cmtMatch.hasMatch()) {
@@ -237,6 +608,9 @@ QString OllamaCli::extractFromBase(const QString &modelfileContent)
     QRegularExpressionMatch match = fromRe.match(modelfileContent);
     if (match.hasMatch()) {
         QString from = match.captured(1).trimmed();
+        // `FROM "/path with spaces/x.gguf"` (ModelfileBuilder::fromLine) is a path too.
+        if (from.size() >= 2 && from.startsWith(QLatin1Char('"')) && from.endsWith(QLatin1Char('"')))
+            from = from.mid(1, from.size() - 2);
         if (!from.startsWith('/')) {
             return from;
         }
@@ -244,57 +618,7 @@ QString OllamaCli::extractFromBase(const QString &modelfileContent)
     return QString();
 }
 
-QString OllamaCli::getModelFromBlob(const QString &name)
-{
-    QString modelfile = showModelfile(name);
-    if (modelfile.isEmpty()) return QString();
-
-    static const QRegularExpression fromLineRe(
-        "^FROM\\s+(/var/lib/ollama/blobs/sha256-[a-f0-9]+)",
-        QRegularExpression::MultilineOption);
-    QRegularExpressionMatch match = fromLineRe.match(modelfile);
-    if (match.hasMatch()) {
-        return match.captured(1).trimmed();
-    }
-    return QString();
-}
-
-int OllamaCli::countBlobReferences(const QString &blob)
-{
-    if (blob.isEmpty()) return 0;
-
-    QList<ModelInfo> models = listModels();
-    int count = 0;
-
-    for (const auto &model : models) {
-        QString otherBlob = getModelFromBlob(model.name);
-        if (otherBlob == blob) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-QString OllamaCli::findOtherModelSharingBlob(const QString &blob, const QString &excludeName)
-{
-    if (blob.isEmpty()) return QString();
-
-    QList<ModelInfo> models = listModels();
-    QString bestMatch;
-
-    for (const auto &model : models) {
-        if (model.name == excludeName) continue;
-        QString otherBlob = getModelFromBlob(model.name);
-        if (otherBlob == blob) {
-            if (bestMatch.isEmpty() || model.name.length() < bestMatch.length()) {
-                bestMatch = model.name;
-            }
-        }
-    }
-    return bestMatch;
-}
-
-// Extracts the value of a Modelfile directive (TEMPLATE, RENDERER, PARSER)
+// Extracts the value of a Modelfile directive (SYSTEM, TEMPLATE, RENDERER, PARSER)
 // from `ollama show --modelfile` output. Triple-quoted values may span lines
 // and the closing quotes may sit on their own line or right after the last
 // character; single-quoted values are unquoted.
@@ -302,9 +626,15 @@ QString OllamaCli::extractDirective(const QString &modelfileContent, const QStri
 {
     static const QString tripleQuote = QStringLiteral("\"\"\"");
 
-    const QRegularExpression re(
-        QStringLiteral("^%1[ \\t]+(.*)$").arg(QRegularExpression::escape(directive)),
-        QRegularExpression::MultilineOption);
+    // Compiled once per directive (P-5): the editor asks for 4 directives per model.
+    static QHash<QString, QRegularExpression> cache;
+    auto it = cache.find(directive);
+    if (it == cache.end()) {
+        it = cache.insert(directive, QRegularExpression(
+                QStringLiteral("^%1[ \\t]+(.*)$").arg(QRegularExpression::escape(directive)),
+                QRegularExpression::MultilineOption));
+    }
+    const QRegularExpression &re = *it;
     const QRegularExpressionMatch match = re.match(modelfileContent);
     if (!match.hasMatch())
         return QString();
@@ -326,155 +656,3 @@ QString OllamaCli::extractDirective(const QString &modelfileContent, const QStri
     return value;
 }
 
-bool OllamaCli::isPulling() const
-{
-    return m_pull != nullptr;
-}
-
-void OllamaCli::listModelsAsync()
-{
-    if (m_list) {
-        m_list->kill();
-        m_list->deleteLater();
-        m_list = nullptr;
-    }
-
-    auto *process = new QProcess(this);
-    m_list = process;
-    process->setProcessChannelMode(QProcess::SeparateChannels);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, process](int exitCode, QProcess::ExitStatus status) {
-        const QString output = QString::fromUtf8(process->readAllStandardOutput());
-        const QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
-        if (m_list == process)
-            m_list = nullptr;
-        process->deleteLater();
-        const bool ok = exitCode == 0 && status == QProcess::NormalExit;
-        emit modelsListed(ok, ok ? parseListOutput(output) : QList<ModelInfo>(), error);
-    });
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart)
-            return;
-        const QString message = process->errorString();
-        if (m_list == process)
-            m_list = nullptr;
-        process->deleteLater();
-        emit modelsListed(false, {}, message);
-    });
-    process->start(m_ollamaPath, {QStringLiteral("list")});
-}
-
-void OllamaCli::pullModelAsync(const QString &name, qint64 expectedBytes)
-{
-    if (m_pull) {
-        m_pull->kill();
-        m_pull->deleteLater();
-        m_pull = nullptr;
-    }
-
-    m_pullBuffer.clear();
-    m_pullParser.reset();
-    m_pullParser.setExpectedBytes(expectedBytes);
-    m_lastPullLabel.clear();
-    m_lastPullReceived = -1;
-    m_lastPullPercent = -2;
-    auto *process = new QProcess(this);
-    m_pull = process;
-    process->setProcessChannelMode(QProcess::MergedChannels);
-
-    auto handleChunk = [this]() {
-        if (!m_pull)
-            return;
-        m_pullBuffer += QString::fromUtf8(m_pull->readAll());
-        int newline;
-        while ((newline = m_pullBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
-            const QString line = m_pullBuffer.left(newline);
-            m_pullBuffer.remove(0, newline + 1);
-            // ANSI escapes and '\r' redraws are handled by the parser.
-            const PullProgressParser::Update update = m_pullParser.feed(line);
-            if (update.percent == m_lastPullPercent
-                    && update.label == m_lastPullLabel
-                    && update.received == m_lastPullReceived)
-                continue;
-            m_lastPullPercent = update.percent;
-            m_lastPullLabel = update.label;
-            m_lastPullReceived = update.received;
-            emit pullProgress(update.label, update.percent, update.received, update.total);
-        }
-    };
-
-    connect(process, &QProcess::readyRead, this, handleChunk);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, process, handleChunk](int exitCode, QProcess::ExitStatus status) {
-        handleChunk();
-        // The last line often has no trailing newline ("success").
-        if (!m_pullBuffer.trimmed().isEmpty()) {
-            const PullProgressParser::Update update = m_pullParser.feed(m_pullBuffer);
-            m_pullBuffer.clear();
-            emit pullProgress(update.label, update.percent, update.received, update.total);
-        }
-        const QString output = QString::fromUtf8(process->readAll()).trimmed();
-        if (m_pull == process)
-            m_pull = nullptr;
-        process->deleteLater();
-        const bool ok = exitCode == 0 && status == QProcess::NormalExit;
-        if (ok) {
-            // Ollama redraws over the last frames, so the biggest layer may end
-            // at 99%: the exit code is what makes the bar full.
-            const PullProgressParser::Update update = m_pullParser.markComplete();
-            emit pullProgress(update.label, update.percent, update.received, update.total);
-        }
-        emit pullFinished(ok, output);
-    });
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
-            if (m_pull == process)
-                m_pull = nullptr;
-            const QString err = process->errorString();
-            process->deleteLater();
-            emit pullFinished(false, err);
-        }
-    });
-
-    process->start(m_ollamaPath, {QStringLiteral("pull"), name});
-}
-
-void OllamaCli::cancelPull()
-{
-    if (m_pull)
-        m_pull->kill();
-}
-
-void OllamaCli::renameModelAsync(const QString &oldName, const QString &newName)
-{
-    auto *copy = new QProcess(this);
-    connect(copy, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, copy, oldName](int exitCode, QProcess::ExitStatus status) {
-        const QString copyOutput = QString::fromUtf8(copy->readAllStandardOutput())
-                + QString::fromUtf8(copy->readAllStandardError());
-        copy->deleteLater();
-        if (exitCode != 0 || status != QProcess::NormalExit) {
-            emit renameFinished(false, copyOutput.trimmed());
-            return;
-        }
-
-        auto *remove = new QProcess(this);
-        connect(remove, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, remove](int rmExit, QProcess::ExitStatus rmStatus) {
-            const QString rmOutput = QString::fromUtf8(remove->readAllStandardOutput())
-                    + QString::fromUtf8(remove->readAllStandardError());
-            remove->deleteLater();
-            emit renameFinished(rmExit == 0 && rmStatus == QProcess::NormalExit,
-                                rmOutput.trimmed());
-        });
-        remove->start(m_ollamaPath, {QStringLiteral("rm"), oldName});
-    });
-    connect(copy, &QProcess::errorOccurred, this, [this, copy](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart)
-            return;
-        const QString message = copy->errorString();
-        copy->deleteLater();
-        emit renameFinished(false, message);
-    });
-    copy->start(m_ollamaPath, {QStringLiteral("cp"), oldName, newName});
-}

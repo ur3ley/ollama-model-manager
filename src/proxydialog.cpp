@@ -346,6 +346,17 @@ void ProxyDialog::updateHint()
         }
     }
 
+    // S-5: TLS off on a network address is allowed, but never silently. Kept
+    // here (not in updateTlsUi) because address/mode changes only reach
+    // updateHint().
+    const bool plaintext = settings.plaintextOnNetwork();
+    tokens::setRole(m_tlsNoteLabel, plaintext ? "danger" : "");
+    tokens::setMuted(m_tlsNoteLabel, !plaintext);
+    if (plaintext)
+        m_tlsNoteLabel->setText(T("proxy.logPlaintextLan"));
+    else if (settings.tls == ProxySettings::TlsMode::Off)
+        m_tlsNoteLabel->clear();
+
     tokens::setRole(m_hintLabel, error ? "danger" : "");
     tokens::setMuted(m_hintLabel, !error);
     m_hintLabel->setText(hint.isEmpty() ? T("proxy.describe").arg(settings.describe()) : hint);

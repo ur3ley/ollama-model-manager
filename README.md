@@ -22,46 +22,61 @@ Browse installed models, tweak their parameters (context size, sampling, penalti
 
 ## Features
 
-- **Model browser** — name, ID, size and last‑modified date for every installed model.
+- **Installed models as repository cards** — the *Installed* tab groups the quants of one
+  repository (Ollama registry or HuggingFace) into a card; a hero strip on top shows the model
+  count, RAM and the disk that really holds Ollama's blobs (`$OLLAMA_MODELS`, `/var/lib/ollama`,
+  `~/.ollama/models`), and whether the Ollama daemon answers.
 - **Parameter editor** with tooltips for each option:
   - `num_ctx` — entered in **K** (1K = 1024 tokens) with a slider + spinbox, hard‑capped at the model's maximum context.
   - `temperature`, `top_p`, `top_k`
   - `repeat_penalty`, `repeat_last_n`, `presence_penalty`, `frequency_penalty`
-  - custom `SYSTEM` prompt
-- **Create / Update models** — generate a `Modelfile` and run `ollama create` for you.
-- **Modelfile preview** — inspect exactly what will be generated before applying.
-- **Rename** (via `ollama cp`) and **delete**, with awareness of shared weight blobs (warns before deleting the last reference).
+  - custom `SYSTEM` prompt (kept verbatim: blank lines and indentation survive an update)
+  - other quants of the same repository in the FROM picker — install a missing one in place.
+- **Create / Update models** — generate a `Modelfile` and run `ollama create` for you; preview it first.
+- **Rename** (via `ollama cp` + `rm`) and **delete**, with awareness of shared weight blobs (warns before deleting the last reference).
+- **Ollama tab** — search ollama.com, pick a tag (size and "fits in memory" hint), `ollama pull`
+  with an aggregate progress bar; installed tags and available updates are marked.
+- **HuggingFace tab** — search GGUF repositories, one entry per quantization (split GGUFs are
+  merged, vision projectors are downloaded alongside), resumable downloads pinned to one commit,
+  `ollama create` straight from the downloaded files, which are deleted afterwards. Gated repos
+  work with a HuggingFace token kept in KDE Wallet (**Tools → HuggingFace token…**).
+- **Provenance** — the manager remembers where each model came from (`models.json`), so it can
+  check for updates; **Tools → Find sources** restores the link for models installed elsewhere.
 - **Import GGUF** — turn a local `.gguf` file into an Ollama model.
 - **Capability‑safe edits** — vision projector and template layers are inherited, not lost.
+- **Themes** — system, light or dark (**View → Theme**, or `OMM_THEME=light|dark`).
 - **Localization** — runtime-loaded `.ini` language files (English & Russian included); add a language by dropping a file in `languages/`.
 - **API tokens + built-in auth proxy** — issue and revoke one token per device (laptop, phone, …)
-  from **Tools → API tokens…**. Tokens live **only in KDE Wallet** and are checked by the proxy
-  inside this application: they are never written to disk, and revocation takes effect on the very
-  next request.
+  from **Tools → API tokens…** (`Ctrl+T`). Tokens live **only in KDE Wallet** and are checked by
+  the proxy inside this application: they are never written to disk, and revocation takes effect
+  on the very next request. Only tokens flagged **Admin** may pull, create or delete models
+  through the proxy.
 - **Daemon & tray** — optionally runs in the background with a tray icon, proxying Ollama on the
-  LAN while the GUI window stays hidden.
+  LAN while the GUI window stays hidden. The proxy runs in its own thread, so dialogs and wallet
+  prompts never stall remote clients.
 
 ---
 
 ## Requirements
 
 - [Ollama](https://ollama.com) installed and available in `PATH`
-- **Qt 6** (Widgets, Core, Network)
+- **Qt 6.5+** (Widgets, Core, Network; Test for the test suite)
 - **KDE Frameworks 6 — KWallet** (`KF6::Wallet`, plus `extra-cmake-modules`) for the token manager
-- **CMake ≥ 3.16**
+- **CMake ≥ 3.21**
 - **OpenSSL** CLI (≥ 3.0) at runtime — used to generate and renew the internal CA/certificate
+  (looked up in `/usr/bin`, `/bin`, `/usr/local/bin` before `PATH`)
 - A C++17 compiler (GCC / Clang)
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install build-essential cmake qt6-base-dev
+sudo apt install build-essential cmake qt6-base-dev libkf6wallet-dev extra-cmake-modules
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install gcc-c++ cmake qt6-qtbase-devel
+sudo dnf install gcc-c++ cmake qt6-qtbase-devel kf6-kwallet-devel extra-cmake-modules
 ```
 
 On Arch:
@@ -81,9 +96,16 @@ cmake -B build
 cmake --build build
 ```
 
-The binary is produced at `build/ollama-model-manager`.
+The binary is produced at `build/ollama-model-manager`. Options:
 
-Optionally install it system‑wide:
+| Option | Default | Meaning |
+|---|---|---|
+| `BUILD_TESTING` | `ON` | build the self-tests and register them with CTest |
+| `OMM_DEV_TOOLS` | `OFF` | build `mainwindow-grab` (offscreen screenshots) |
+| `OMM_WARNINGS_AS_ERRORS` | `OFF` | `-Werror` on top of `-Wall -Wextra -Wshadow` |
+
+Optionally install it system‑wide (binary, languages, `.desktop` file, systemd unit under
+`share/ollama-model-manager/systemd`):
 
 ```bash
 sudo cmake --install build
@@ -97,21 +119,37 @@ sudo cmake --install build
 ./build/ollama-model-manager
 ```
 
-1. The left panel lists your installed models. Select one to load its parameters into the editor.
+1. The *Installed* tab lists your models as cards. Select one to load its parameters into the editor.
 2. Adjust parameters. Use **Preview** to see the generated `Modelfile`.
 3. **Update** rebuilds the selected model in place; change the **Name** field and press **Create** to save a new variant instead.
-4. **Import GGUF** (Ctrl+I) creates a model from a local `.gguf` file.
+4. The *Ollama* and *HuggingFace* tabs (`Ctrl+D` switches between them) search and install new models.
+5. **Import GGUF** (`Ctrl+I`) creates a model from a local `.gguf` file.
 
-Keyboard shortcuts: `Ctrl+N` new model · `Ctrl+I` import GGUF · `F5` refresh · `Ctrl+Q` quit.
+Keyboard shortcuts: `Ctrl+N` new model · `Ctrl+I` import GGUF · `Ctrl+D` Ollama/HuggingFace tabs ·
+`Ctrl+T` API tokens · `F5` refresh · `Ctrl+Q` quit.
 
 > The interface language can be changed at runtime via the **Language** menu.
+
+### Where the files are
+
+| What | Path |
+|---|---|
+| Settings (proxy, theme, language) | `~/.config/ollama-manager/config.ini` (0600) |
+| Model provenance | `~/.config/ollama-manager/models.json` |
+| Proxy TLS material | `~/.config/ollama-manager/tls/` (0700) |
+| Downloaded GGUF sources | `~/.local/share/ollama-manager/models` (deleted after a successful import) |
+| Secrets (API tokens, HF token) | KDE Wallet `kdewallet`, folders `ollama-auth` / `ollama-model-manager` |
+
+Versions before 2026-11-22 kept the language in `~/.config/OllamaManager/Ollama Model Manager.conf`,
+`models.json` in `~/.config/OllamaManager/Ollama Model Manager/` and downloads in
+`~/.local/share/OllamaManager/Ollama Model Manager/models`; they are moved on the first start.
 
 ---
 
 ## Built-in auth proxy
 
 The manager itself can act as a token-checking reverse proxy in front of Ollama. It replaces the
-earlier nginx + podman container (archived in [`legacy/`](legacy/)): no Python script, no tmpfs
+earlier nginx + podman container: no Python script, no tmpfs
 snippet, no container reload — tokens are read from KDE Wallet into process memory and looked up
 by SHA-256, so plaintext tokens never leave the wallet.
 
@@ -167,21 +205,44 @@ obtained via deSEC DNS‑01 (`lego`). Keys never leave `~/.config/ollama-manager
 | Piece | Value |
 |---|---|
 | Wallet | `kdewallet`, folder `ollama-auth` |
-| Keys | `<device>` = token, `created:<device>` = ISO-8601 date |
+| Keys | `<device>` = token, `created:<device>` = ISO-8601 date, `admin:<device>` = `1` |
 | Token format | 24 random bytes → 48 hex characters |
-| Endpoint | `https://ollama.example.org` |
+| Endpoint | `[proxy] public_url` in `config.ini`, e.g. `https://ollama.example.org` |
 
 Workflow: **Tools → API tokens… → Issue token** → type a device name → the token is shown once in a
 modal window (selectable, copied only by an explicit button; it never leaves the wallet in plaintext
 afterwards; **Show** reveals it on demand). **Revoke** removes it from the wallet, and the device
 loses access immediately. **Copy URL** puts the endpoint on the clipboard.
 
-Manual smoke tests:
+The **Admin** column of the dialog decides who may manage models through the proxy: with
+`[proxy] admin_api = restricted` (the default) a token without it gets the client API only
+(chat, generate, embeddings, model list) and `403` on `/api/pull`, `/api/create`, `/api/delete`…
+Set `admin_api = open` to let every token do everything, as before.
+
+## Testing
 
 ```bash
-./build/token-selftest   # wallet: list → issue → read → revoke (needs an unlocked wallet)
-./build/proxy-selftest   # proxy: auth, header rewriting, streaming, chunked bodies
+cmake -B build && cmake --build build
+ctest --test-dir build --output-on-failure
 ```
+
+15 offline tests run under CTest with an isolated `HOME` and the offscreen platform — no
+network, no Ollama daemon, no KDE Wallet:
+
+| Test | Covers |
+|---|---|
+| `proxy-selftest` | auth proxy: tokens, admin allow-list, header rewriting, streaming, limits, TLS |
+| `ollamajobs-selftest` | `OllamaCli` jobs and `InstallService` against a fake `ollama` (queued pulls, crashes, partial rename, cleanup) |
+| `hfdownload-selftest` | HuggingFace download against a local HTTP server: resume, 416, size check, revision pinning, token not sent to the CDN |
+| `migration-selftest` | first-run migrations (downloads, language, `admin_api`), FROM quoting |
+| `hfclient`, `hfvariants`, `registryclient` | HuggingFace / ollama.com parsers and variant grouping |
+| `modelfile-parse`, `pullprogress`, `ggufmeta` | Modelfile parsing/building, pull progress, GGUF header reader |
+| `provenance`, `repogroup`, `modelfilters` | `models.json`, repository cards, hub filters |
+| `discoverpanel`, `ggufimportdialog` | widget smoke tests (offscreen) |
+
+Not in CTest: `token-selftest` needs an unlocked KDE Wallet (it works in its own folder
+`ollama-auth-selftest` and removes it afterwards); `discoverpanel-selftest --live/--pull` use the
+network; fuzzing and stress tools live in `tests/audit/`.
 
 ## Localization
 

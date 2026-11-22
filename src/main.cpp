@@ -7,7 +7,7 @@
 #include <QHostAddress>
 #include <QLocalServer>
 #include <QLocalSocket>
-#include <QSettings>
+#include <QStandardPaths>
 
 #include <cstdio>
 #include <cstring>
@@ -16,13 +16,16 @@
 
 #include <unistd.h>
 
+#include "apppaths.h"
 #include "i18n.h"
 #include "mainwindow.h"
+#include "provenance.h"
 #include "proxyservice.h"
 #include "proxysettings.h"
 #include "theme.h"
 #include "tokenmanager.h"
 #include "trayicon.h"
+#include "uisettings.h"
 
 static QString findLanguagesDir()
 {
@@ -136,6 +139,11 @@ int main(int argc, char *argv[])
     app.setApplicationVersion("1.1.0");
     app.setOrganizationName("OllamaManager");
 
+    // ~/.config/ollama-manager: адреса, апстрим, история загрузок — только
+    // владельцу (S-8), как и tls/ внутри. Старый 0755 тоже ужесточается.
+    apppaths::ensurePrivateDir(apppaths::configDir());
+    apppaths::restrictFile(apppaths::configFile());
+
     if (auto *guiApp = qobject_cast<QApplication *>(&app)) {
         // Без окна приложение не должно завершаться: прокси живёт в трее.
         guiApp->setQuitOnLastWindowClosed(false);
@@ -145,8 +153,13 @@ int main(int argc, char *argv[])
     // никогда не показалось в системном стиле, а затем перекрасилось.
     theme::apply();
 
+    // Язык и флаг подсказки трея жили в QSettings по умолчанию
+    // (~/.config/OllamaManager/…conf); теперь — [ui] в config.ini. Копируем
+    // один раз, старый файл не трогаем (откат — см. JOURNAL.md).
+    const int uiMigrated = uisettings::migrateLegacy();
+
     I18n::instance()->setLanguagesDir(findLanguagesDir());
-    QString saved = QSettings().value("language", "en").toString();
+    QString saved = uisettings::language();
     if (!I18n::instance()->setLanguage(saved)) {
         if (!I18n::instance()->setLanguage("en"))
             qWarning("i18n: ни '%s', ни 'en' не загрузились, каталог языков: %s",
@@ -222,6 +235,37 @@ int main(int argc, char *argv[])
     if (!localServer.isListening()) {
         logLine(QStringLiteral("warning: single-instance socket unavailable: %1")
                     .arg(localServer.errorString()));
+    }
+
+    if (uiMigrated > 0) {
+        logLine(QStringLiteral("settings: language/tray hint moved to %1 [ui]")
+                    .arg(apppaths::configFile()));
+    }
+
+    // Загрузки GGUF переехали в путь без пробелов (он попадает в FROM).
+    // Только rename: файлы, которые не удалось перенести, остаются на месте.
+    // Только в GUI: загрузками пользуется окно, а юнит systemd видит
+    // ~/.local/share только для чтения (ProtectHome=read-only).
+    if (graphical) {
+        const QString genericData =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        const apppaths::DownloadMigration moved = apppaths::migrateDownloads(
+            apppaths::legacyDownloadDir(), apppaths::downloadDir(), genericData);
+        if (moved.moved > 0) {
+            logLine(QStringLiteral("downloads: moved %1 file(s) to %2")
+                        .arg(moved.moved).arg(apppaths::downloadDir()));
+        }
+        // models.json хранит имена файлов репозитория, но абсолютный путь в
+        // записи (ручная правка, будущий формат) тоже должен остаться верным.
+        const int rebased = Provenance::instance().rebasePaths(apppaths::legacyDownloadDir(),
+                                                               apppaths::downloadDir());
+        if (rebased > 0)
+            logLine(QStringLiteral("downloads: %1 path(s) updated in models.json").arg(rebased));
+        if (!moved.skipped.isEmpty()) {
+            logLine(QStringLiteral("warning: downloads left in %1 (name taken or rename failed): %2")
+                        .arg(apppaths::legacyDownloadDir(),
+                             moved.skipped.join(QStringLiteral(", "))));
+        }
     }
 
     if (parser.isSet(configOption))
@@ -300,10 +344,9 @@ int main(int argc, char *argv[])
                 QObject::connect(window.get(), &MainWindow::hiddenToTray, &app, [&]() {
                     // Подсказка — один раз за установку: дальше пользователь уже знает,
                     // что крестик сворачивает окно в трей, а не закрывает приложение.
-                    QSettings settings;
-                    if (settings.value(QStringLiteral("trayCloseHintShown"), false).toBool())
+                    if (uisettings::trayHintShown())
                         return;
-                    settings.setValue(QStringLiteral("trayCloseHintShown"), true);
+                    uisettings::setTrayHintShown();
                     tray->showMessage(T("tray.hiddenTitle"), T("tray.hiddenText"));
                 });
             }

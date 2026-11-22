@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ollama Model Manager
+GenericName=Model manager for Ollama
+Comment=Browse, install and edit Ollama models; authenticated proxy in the tray
+Comment[ru]=Поиск, установка и правка моделей Ollama; прокси с авторизацией в трее
+Exec=ollama-model-manager
+Icon=view-list-details
+Terminal=false
+Categories=Utility;Development;
+Keywords=ollama;llm;gguf;huggingface;proxy;
+StartupNotify=true

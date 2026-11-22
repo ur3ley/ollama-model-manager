@@ -53,6 +53,9 @@ public:
     static QString certPath();
     static QString keyPath();
 
+    /** DNS-имена из SAN текущего листового сертификата (пусто, если его нет). */
+    static QStringList leafDnsNames();
+
     /** "openssl 3.0.13 ..." в *version; false — нет бинарника или он < 3.0. */
     static bool opensslAvailable(QString *version = nullptr);
 
@@ -60,7 +63,7 @@ public:
      * Материал под запрошенный режим.
      *
      * addresses — адреса для SAN (IP:...), dnsName — DNS:..., обычно хост из
-     * TokenManager::endpoint(). Для Off — пустой ok-материал, для Files —
+     * ProxySettings::publicUrl ([proxy] public_url). Для Off — пустой ok-материал, для Files —
      * проверка пары cert/key, для LetsEncrypt — ошибка «позже».
      */
     TlsMaterial ensure(ProxySettings::TlsMode mode, const QStringList &addresses,

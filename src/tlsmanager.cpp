@@ -1,5 +1,7 @@
 #include "tlsmanager.h"
 
+#include "apppaths.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -31,19 +33,37 @@ QString tlsDirectory()
 {
     if (!g_directoryOverride.isEmpty())
         return g_directoryOverride;
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-    return QDir(base).filePath(QStringLiteral("ollama-manager/tls"));
+    return QDir(apppaths::configDir()).filePath(QStringLiteral("tls"));
 }
 
 /**
  * Запуск openssl. При ошибке в *error попадает stderr — он у openssl
  * человекочитаемый и не содержит секретов (ключи читаются из файлов).
  */
+/**
+ * Абсолютный путь к openssl (S-7): сначала системные каталоги, и только потом
+ * PATH — чтобы подменённый ~/.local/bin/openssl (он первым в PATH юнита) не
+ * получил генерацию CA-ключа. Ищется один раз за процесс.
+ */
+QString openSslProgram()
+{
+    static const QString program = [] {
+        const QString system = QStandardPaths::findExecutable(
+            QStringLiteral("openssl"),
+            {QStringLiteral("/usr/bin"), QStringLiteral("/bin"), QStringLiteral("/usr/local/bin")});
+        if (!system.isEmpty())
+            return system;
+        const QString fromPath = QStandardPaths::findExecutable(QStringLiteral("openssl"));
+        return fromPath.isEmpty() ? QStringLiteral("openssl") : fromPath;
+    }();
+    return program;
+}
+
 bool runOpenSsl(const QStringList &args, const QString &workDir, QString *error,
                 QByteArray *output = nullptr)
 {
     QProcess process;
-    process.setProgram(QStringLiteral("openssl"));
+    process.setProgram(openSslProgram());
     process.setArguments(args);
     if (!workDir.isEmpty())
         process.setWorkingDirectory(workDir);
@@ -234,7 +254,8 @@ bool keyMatchesCert(const QString &certFile, const QString &keyFile, QString *er
     // PEM-обёртки могут отличаться (\r\n); важен сам base64-блок.
     const auto strip = [](const QByteArray &pem) {
         QByteArray out;
-        for (const QByteArray &line : pem.split('\n')) {
+        const QList<QByteArray> lines = pem.split('\n');
+        for (const QByteArray &line : lines) {
             const QByteArray trimmed = line.trimmed();
             if (trimmed.startsWith('-'))
                 continue;
@@ -285,6 +306,12 @@ QString TlsManager::certPath()
 QString TlsManager::keyPath()
 {
     return QDir(tlsDirectory()).filePath(QStringLiteral("server.key"));
+}
+
+QStringList TlsManager::leafDnsNames()
+{
+    const QSslCertificate leaf = loadCert(certPath());
+    return leaf.isNull() ? QStringList() : certDnsNames(leaf);
 }
 
 bool TlsManager::opensslAvailable(QString *version)

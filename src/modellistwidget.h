@@ -59,7 +59,7 @@ signals:
     void importGGUFRequested();
 
 private slots:
-    void onContextMenu(const QPoint &pos);
+    void onContextMenu(QPoint pos);
     void onFilterChanged(const QString &text);
 
 private:
@@ -77,7 +77,11 @@ private:
     QPushButton *m_refreshBtn;
     QToolButton *m_deleteBtn;
     QList<RepoGroup> m_groups;
+    QList<OllamaCli::ModelInfo> m_models;  // last `ollama list`, regrouped on provenance changes
+    bool m_regroupQueued = false;
     bool m_refreshing = false;
+    // A refresh asked for while one runs: that list may predate the change.
+    bool m_refreshAgain = false;
 };
 
 #endif // MODELLISTWIDGET_H

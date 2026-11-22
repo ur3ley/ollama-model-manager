@@ -3,7 +3,6 @@
 
 #include <QMainWindow>
 #include <QSplitter>
-#include <QTemporaryFile>
 #include <QMenu>
 #include <QAction>
 #include <QActionGroup>
@@ -12,6 +11,7 @@
 #include "modeleditorwidget.h"
 #include "i18n.h"
 
+class InstallService;
 class TokenManager;
 class ProxyService;
 class DiscoverPanel;
@@ -68,12 +68,13 @@ private:
     void retranslateUi();
     /** Rename a quant, moving its provenance entry; content is applied afterwards. */
     void startRename(const QString &oldName, const QString &newName, const QString &content);
+    /** Second half of onDeleteModel(): the dialog, once the blob usage is known. */
+    void confirmDelete(const QString &modelName, int refCount);
 
     void closeEvent(QCloseEvent *event) override;
 
-    QString writeTempModelfile(const QString &content);
-
     OllamaCli *m_cli;
+    InstallService *m_install;
     TokenManager *m_tokens;
     ProxyService *m_proxy;
     bool m_hideOnClose = false;
@@ -86,10 +87,7 @@ private:
     QString m_pendingSelectRepo;
     /** After binding, select the card that now contains this model name. */
     QString m_pendingSelectModel;
-    QString m_renameOld;
-    QString m_renameNew;
-    QString m_renameSelectId;
-    QString m_renameContent;
+    bool m_refreshQueued = false;  // onRefreshAll() coalescing (P-3)
     DiscoverPanel *m_hfPanel = nullptr;
     StartPageHeader *m_hero = nullptr;
     QSplitter *m_splitter;

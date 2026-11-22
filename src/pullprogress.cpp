@@ -3,6 +3,7 @@
 #include <QRegularExpression>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -132,7 +133,7 @@ PullProgressParser::Update PullProgressParser::feed(const QString &raw)
 
     if (layerFrame.isEmpty()) {
         if (!stageFrame.isEmpty())
-            m_label = stageFrame;
+            m_label = std::move(stageFrame);
         return snapshot();
     }
 

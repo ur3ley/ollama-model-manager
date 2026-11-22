@@ -2,19 +2,27 @@
 #define PROVENANCE_H
 
 #include <QJsonObject>
+#include <QObject>
 #include <QString>
 
 // Remembers where an installed model came from, so the "On device" list can
 // tell the user which source to ask about updates.
 //
-// Stored as JSON in the app config directory (models.json). Entries:
+// Stored as JSON in ~/.config/ollama-manager/models.json (apppaths.h); a file
+// left at the pre-2026-11 location is moved there on first use. Entries:
 //   {
 //     "qwen3:8b": { "source": "ollama", "ref": "qwen3:8b", "digest": "abc123…" },
 //     "repo/file.gguf": { "source": "hf", "ref": "owner/repo", "file": "x.gguf",
 //                          "sha": "0123…", "installedAt": "2026-11-21T12:00:00Z" }
 //   }
-class Provenance
+//
+// The application shares one store (instance()); services get it injected
+// (InstallService), tests build their own on a temporary path (A-3). Every
+// change is announced with changed(), so views do not have to re-read the
+// store by hand after each operation.
+class Provenance : public QObject
 {
+    Q_OBJECT
 public:
     struct Entry {
         QString source;       // "ollama", "hf" or empty
@@ -29,6 +37,9 @@ public:
 
     static Provenance &instance();
 
+    /** A store on `path` (no legacy migration): for tests and tools. */
+    explicit Provenance(const QString &path, QObject *parent = nullptr);
+
     void record(const QString &modelName, const Entry &entry);
     Entry lookup(const QString &modelName) const;
     bool contains(const QString &modelName) const;
@@ -42,14 +53,37 @@ public:
      */
     void rename(const QString &oldName, const QString &newName);
 
+    /**
+     * Rewrites every string field that starts with the directory `from` to
+     * start with `to` instead (the download directory moved). Returns the
+     * number of rewritten fields. The current format stores repository file
+     * names only; this keeps hand-edited or future absolute paths valid.
+     */
+    int rebasePaths(const QString &from, const QString &to);
+
+    /** Path of the JSON file this store reads and writes. */
+    QString path() const { return m_path; }
+
     /** Where the file lives (exposed for the self-test). */
     static QString storePath();
+    /** Where older versions kept it (AppConfigLocation/models.json). */
+    static QString legacyStorePath();
+    /**
+     * Move `from` to `to` unless `to` already exists (copy if rename fails).
+     * Returns true when a file was migrated. Public for the self-test.
+     */
+    static bool migrateLegacy(const QString &from, const QString &to);
+
+signals:
+    /** An entry was recorded, removed or renamed (both names are announced on rename). */
+    void changed(const QString &modelName);
 
 private:
     Provenance();
     void load();
     void save() const;
 
+    QString m_path;
     QJsonObject m_data;
 };
 

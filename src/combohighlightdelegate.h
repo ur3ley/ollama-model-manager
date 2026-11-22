@@ -12,6 +12,7 @@
 // the repository list uses, then lets the base delegate paint the text.
 class ComboHighlightDelegate : public QStyledItemDelegate
 {
+    Q_OBJECT
 public:
     explicit ComboHighlightDelegate(QObject *parent = nullptr)
         : QStyledItemDelegate(parent)

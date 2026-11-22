@@ -2,6 +2,7 @@
 
 #include "designtokens.h"
 #include "i18n.h"
+#include "proxysettings.h"
 #include "tokenmanager.h"
 
 #include <QApplication>
@@ -27,13 +28,17 @@ TokenDialog::TokenDialog(TokenManager *manager, QWidget *parent)
     m_endpointLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_endpointLabel->setWordWrap(true);
 
-    m_table = new QTableWidget(0, 2, this);
+    m_table = new QTableWidget(0, 3, this);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->setHorizontalHeaderLabels({T("tokens.device"), T("tokens.created")});
+    m_table->setHorizontalHeaderLabels(
+            {T("tokens.device"), T("tokens.created"), T("tokens.admin")});
+    m_table->horizontalHeaderItem(2)->setToolTip(T("tokens.adminTip"));
+    // The admin column is a checkbox: toggling it writes the flag to the wallet.
+    connect(m_table, &QTableWidget::itemChanged, this, &TokenDialog::onAdminToggled);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() {
         const bool hasSelection = !selectedDevice().isEmpty();
         m_revokeButton->setEnabled(hasSelection);
@@ -63,6 +68,9 @@ TokenDialog::TokenDialog(TokenManager *manager, QWidget *parent)
 
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(m_endpointLabel);
+    m_policyLabel = new QLabel(this);
+    m_policyLabel->setWordWrap(true);
+    layout->addWidget(m_policyLabel);
     layout->addWidget(m_table, 1);
     layout->addLayout(buttons);
     layout->addWidget(m_statusLabel);
@@ -74,7 +82,14 @@ TokenDialog::TokenDialog(TokenManager *manager, QWidget *parent)
     connect(m_copyUrlButton, &QPushButton::clicked, this, &TokenDialog::onCopyUrl);
     connect(m_refreshButton, &QPushButton::clicked, this, &TokenDialog::refresh);
 
-    m_endpointLabel->setText(T("tokens.endpoint").arg(TokenManager::endpoint()));
+    const ProxySettings proxySettings = ProxySettings::load();
+    m_endpoint = proxySettings.endpoint();
+    // admin_api=restricted по умолчанию: без флага «Админ» токен не может
+    // качать/удалять модели через прокси — говорим об этом прямо здесь.
+    m_policyLabel->setText(proxySettings.restrictAdminApi ? T("tokens.policyRestricted")
+                                                          : T("tokens.policyOpen"));
+    m_endpointLabel->setText(T("tokens.endpoint").arg(m_endpoint));
+    m_copyUrlButton->setEnabled(!m_endpoint.isEmpty());
     refresh();
 }
 
@@ -98,6 +113,8 @@ void TokenDialog::refresh()
     QString error;
     const QList<TokenManager::Entry> entries = m_manager->entries(&error);
 
+    // Rebuilding the rows must not look like the user toggling checkboxes.
+    const QSignalBlocker blocker(m_table);
     m_table->setRowCount(0);
     for (const TokenManager::Entry &entry : entries) {
         const int row = m_table->rowCount();
@@ -108,6 +125,11 @@ void TokenDialog::refresh()
             created.isValid() ? created.toString(QStringLiteral("yyyy-MM-dd HH:mm")) : entry.created;
         m_table->setItem(row, 0, new QTableWidgetItem(entry.device));
         m_table->setItem(row, 1, new QTableWidgetItem(createdText));
+        auto *admin = new QTableWidgetItem;
+        admin->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+        admin->setCheckState(entry.admin ? Qt::Checked : Qt::Unchecked);
+        admin->setToolTip(T("tokens.adminTip"));
+        m_table->setItem(row, 2, admin);
     }
     m_table->resizeColumnToContents(0);
     m_revokeButton->setEnabled(false);
@@ -188,7 +210,7 @@ void TokenDialog::onShow()
         setStatus(T("tokens.walletError").arg(error), true);
         return;
     }
-    setStatus(T("tokens.shown").arg(device).arg(value));
+    setStatus(T("tokens.shown").arg(device, value));
 }
 
 void TokenDialog::onCopy()
@@ -208,8 +230,28 @@ void TokenDialog::onCopy()
     setStatus(T("tokens.copied").arg(device));
 }
 
+void TokenDialog::onAdminToggled(QTableWidgetItem *item)
+{
+    if (!item || item->column() != 2)
+        return;
+    const QTableWidgetItem *deviceItem = m_table->item(item->row(), 0);
+    if (!deviceItem)
+        return;
+    const QString device = deviceItem->text();
+    const bool admin = item->checkState() == Qt::Checked;
+    QString error;
+    if (!m_manager->setAdmin(device, admin, &error)) {
+        setStatus(T("tokens.walletError").arg(error), true);
+        // Restore the checkbox from the wallet, but not from inside the
+        // itemChanged emission of the item that refresh() would delete.
+        QMetaObject::invokeMethod(this, &TokenDialog::refresh, Qt::QueuedConnection);
+        return;
+    }
+    setStatus((admin ? T("tokens.adminOn") : T("tokens.adminOff")).arg(device));
+}
+
 void TokenDialog::onCopyUrl()
 {
-    QApplication::clipboard()->setText(TokenManager::endpoint());
+    QApplication::clipboard()->setText(m_endpoint);
     setStatus(T("tokens.urlCopied"));
 }

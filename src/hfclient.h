@@ -8,6 +8,8 @@
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 
+#include <memory>
+
 // Thin wrapper over the public HuggingFace Hub API, enough to browse GGUF
 // repos and download a single quant file.
 //
@@ -18,8 +20,9 @@
 //
 // Public repositories need no authentication; gated ones answer 401 until a
 // user token is set with setToken(). The token is sent as
-// `Authorization: Bearer <token>` on every request, exactly what the Hub asks
-// for.
+// `Authorization: Bearer <token>` on every request to the Hub, exactly what
+// the Hub asks for — and never to another host a redirect points at (the
+// `/resolve/` CDN hop is followed by hand without it).
 //
 // The JSON parsers and the request builder are static so they can be tested
 // offline.
@@ -68,13 +71,32 @@ public:
      * Authorization header can be checked without any network access.
      */
     static QNetworkRequest requestFor(const QUrl &url, const QString &token);
+    /**
+     * Request for the next hop of a manually followed redirect: same origin
+     * keeps every header, another host gets them all except Authorization.
+     */
+    static QNetworkRequest redirectRequestFor(const QNetworkRequest &previous, const QUrl &target);
+    /** Same scheme, host (case-insensitive) and effective port. */
+    static bool sameOrigin(const QUrl &a, const QUrl &b);
 
     void search(const QString &query, int limit = 40,
                 const QString &sort = QStringLiteral("downloads"));
     void listFiles(const QString &repo);
     /** Current commit sha of a repository (update check). */
     void fetchRepoInfo(const QString &repo);
-    void download(const QString &repo, const QString &file, const QString &destDir);
+    /**
+     * Download one repository file into `destDir` (resuming a `.part`).
+     * `expectedSize` (bytes, 0 = unknown) is the size the Hub API reported:
+     * a body of a different length is rejected instead of being renamed into
+     * a GGUF that `ollama create` would import truncated.
+     * `revision` (a commit sha; empty = `main`) pins the download to one
+     * commit, also across resumes: a `.part` recorded for another revision
+     * is started over instead of being spliced (B-10).
+     */
+    void download(const QString &repo, const QString &file, const QString &destDir,
+                  qint64 expectedSize = 0, const QString &revision = QString());
+    /** Tests only: talk to `base` (e.g. http://127.0.0.1:port) instead of huggingface.co. */
+    static void setHubBaseForTest(const QString &base);
     void cancelDownload();
 
     static QList<Repo> parseSearch(const QByteArray &json);
@@ -90,7 +112,12 @@ signals:
     void downloadFinished(bool ok, const QString &path, const QString &error);
 
 private:
+    // One download across its redirect hops (defined in hfclient.cpp).
+    struct DownloadState;
+
     QNetworkReply *get(const QUrl &url);
+    void startDownloadRequest(const std::shared_ptr<DownloadState> &state,
+                              const QNetworkRequest &request);
     static QString networkError(QNetworkReply *reply);
 
     QString m_token;  // empty: anonymous Hub access

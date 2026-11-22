@@ -5,6 +5,8 @@
 
 #include <kwallet.h>
 
+#include "walletopen.h"
+
 namespace {
 
 const char *kFolder = "ollama-model-manager";
@@ -38,9 +40,14 @@ KWallet::Wallet *wallet(bool allowPrompt)
     if (!allowPrompt && !KWallet::Wallet::isOpen(HfAuth::walletName()))
         return nullptr;
 
-    cached = KWallet::Wallet::openWallet(HfAuth::walletName(), 0,
-                                         KWallet::Wallet::Synchronous);
-    return cached && cached->isOpen() ? cached : nullptr;
+    // Not re-entered: the opening loop excludes user input (walletopen.h).
+    static bool opening = false;
+    if (opening)
+        return nullptr;
+    opening = true;
+    cached = walletopen::open(HfAuth::walletName());
+    opening = false;
+    return cached;
 }
 
 void walletError(QString *error, const char *what)

@@ -64,6 +64,18 @@ void writeStringArrayKv(QDataStream &ds, const QByteArray &key, const QList<QByt
         writeGgufString(ds, v);
 }
 
+// An array of arrays (allowed by the spec): must be skipped, not rejected (B-14).
+void writeNestedArrayKv(QDataStream &ds, const QByteArray &key)
+{
+    writeGgufString(ds, key);
+    ds << T_ARRAY;
+    ds << T_ARRAY << quint64(2);
+    for (int i = 0; i < 2; ++i) {
+        ds << T_UINT32 << quint64(2);
+        ds << quint32(i) << quint32(i + 1);
+    }
+}
+
 void writeTensorInfo(QDataStream &ds, const QByteArray &name, const QList<quint64> &dims)
 {
     writeGgufString(ds, name);
@@ -86,7 +98,7 @@ QString writeFixture(const QString &path, const QByteArray &chatTemplate)
     writeBytes(ds, QByteArrayLiteral("GGUF"));
     ds << quint32(3);
     ds << quint64(2);  // tensors
-    ds << quint64(6);  // metadata entries
+    ds << quint64(7);  // metadata entries
 
     writeStringKv(ds, QByteArrayLiteral("general.architecture"), QByteArrayLiteral("testarch"));
     writeStringKv(ds, QByteArrayLiteral("general.name"), QByteArrayLiteral("Test Model"));
@@ -94,6 +106,7 @@ QString writeFixture(const QString &path, const QByteArray &chatTemplate)
     writeU32Kv(ds, QByteArrayLiteral("testarch.context_length"), 8192);
     writeStringArrayKv(ds, QByteArrayLiteral("tokenizer.ggml.tokens"),
                        {QByteArrayLiteral("<s>"), QByteArrayLiteral("</s>"), QByteArrayLiteral("hi")});
+    writeNestedArrayKv(ds, QByteArrayLiteral("test.nested_array"));
     writeStringKv(ds, QByteArrayLiteral("tokenizer.chat_template"), chatTemplate);
 
     writeTensorInfo(ds, QByteArrayLiteral("blk.0.a"), {2, 3}); // 6

@@ -1,13 +1,17 @@
 #include "discoverpanel.h"
+#include "apppaths.h"
 
 #include "designtokens.h"
+#include "format.h"
 #include "combohighlightdelegate.h"
 #include "hfauth.h"
 #include "hftokendialog.h"
 #include "hfvariants.h"
 #include "i18n.h"
+#include "installservice.h"
 #include "memoryinfo.h"
 #include "modelbrowserpanel.h"
+#include "modelfilebuilder.h"
 #include "ollamacli.h"
 #include "popupcombobox.h"
 #include "provenance.h"
@@ -32,31 +36,13 @@
 
 namespace {
 
+// Sizes in this panel show "—" when unknown.
 QString humanSize(qint64 bytes)
 {
-    if (bytes <= 0)
-        return QStringLiteral("—");
-    static const char *units[] = {"B", "KB", "MB", "GB", "TB"};
-    double value = double(bytes);
-    int unit = 0;
-    while (value >= 1024.0 && unit < 4) {
-        value /= 1024.0;
-        ++unit;
-    }
-    return QString::number(value, 'f', value < 10.0 ? 1 : 0)
-            + QLatin1Char(' ') + QLatin1String(units[unit]);
+    return format::byteSize(bytes, QStringLiteral("—"));
 }
 
-QString shortNumber(qint64 value)
-{
-    if (value >= 1000000000)
-        return QString::number(value / 1e9, 'f', 1) + QStringLiteral("B");
-    if (value >= 1000000)
-        return QString::number(value / 1e6, 'f', 1) + QStringLiteral("M");
-    if (value >= 1000)
-        return QString::number(value / 1e3, 'f', 1) + QStringLiteral("K");
-    return QString::number(value);
-}
+
 
 double parseCompactNumber(const QString &text)
 {
@@ -80,11 +66,10 @@ double parseCompactNumber(const QString &text)
     return ok ? value * multiplier : 0.0;
 }
 
+// Shared with MainWindow's source cleanup: both must look in the same place.
 QString defaultDownloadDir()
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return (base.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::HomeLocation) : base)
-            + QStringLiteral("/models");
+    return apppaths::downloadDir();
 }
 
 // Bytes free on the filesystem that holds `dir`; 0 when it cannot be queried
@@ -108,10 +93,11 @@ quint64 requiredSpaceBytes(qint64 modelBytes)
 
 } // namespace
 
-DiscoverPanel::DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent)
+DiscoverPanel::DiscoverPanel(Source source, InstallService *install, QWidget *parent)
     : QWidget(parent)
     , m_source(source)
-    , m_cli(cli)
+    , m_install(install)
+    , m_cli(install->cli())
     , m_registry(new RegistryClient(this))
     , m_hf(new HfClient(this))
 {
@@ -249,52 +235,13 @@ DiscoverPanel::DiscoverPanel(Source source, OllamaCli *cli, QWidget *parent)
         applyHfStates(repo);
     });
 
-    // A downloaded GGUF is only usable after `ollama create` finished; only
-    // then does the variant get its "on device" mark.
-    connect(m_cli, &OllamaCli::createFinished, this,
-            [this](bool ok, const QString &output) {
-        if (m_pendingCreateName.isEmpty())
-            return;
-        const QString name = m_pendingCreateName;
-        m_pendingCreateName.clear();
-        m_panel->setBusy(false, 0);
-        if (!ok) {
-            m_panel->setStatus(T("browser.createFailed").arg(output));
-            return;
-        }
-
-        Provenance::Entry entry;
-        entry.source = QStringLiteral("hf");
-        entry.ref = m_pendingCreateRepo;
-        entry.file = m_pendingCreateFile;
-        // The commit the file came from is the baseline of the next update
-        // check; unknown (repo info failed) leaves the field empty, which the
-        // comparison treats as "no update".
-        entry.sha = m_repoShas.value(m_pendingCreateRepo);
-        Provenance::instance().record(name, entry);
-
-        // Ollama has copied the shards into its blob store: the downloaded
-        // sources are now a second full copy, so drop them.
-        quint64 freed = 0;
-        for (const QString &path : std::as_const(m_pendingCreateSources)) {
-            const qint64 size = QFileInfo(path).size();
-            if (QFile::remove(path))
-                freed += quint64(qMax<qint64>(size, 0));
-            QFile::remove(path + QStringLiteral(".part"));
-        }
-        m_pendingCreateSources.clear();
-
-        refreshInstalled();
-        if (!m_pendingItemId.isEmpty())
-            applyHfVariants(m_pendingItemId);
-        m_panel->setStatus(freed > 0
-                ? T("browser.installedCleaned").arg(name, humanSize(qint64(freed)))
-                : T("search.installed").arg(name));
-        emit installedChanged();
+    // Installed marks come from the list the main window refreshes anyway;
+    // asking `ollama list` synchronously on every card click froze the UI.
+    connect(m_cli, &OllamaCli::modelsListed, this,
+            [this](bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &) {
+        if (ok)
+            applyInstalledList(models);
     });
-
-    connect(m_cli, &OllamaCli::pullProgress, this, &DiscoverPanel::onPullProgress);
-    connect(m_cli, &OllamaCli::pullFinished, this, &DiscoverPanel::onPullFinished);
     connect(m_hf, &HfClient::downloadProgress, this, &DiscoverPanel::onDownloadProgress);
     connect(m_hf, &HfClient::downloadFinished, this, &DiscoverPanel::onDownloadFinished);
 }
@@ -451,7 +398,7 @@ void DiscoverPanel::rebuildItems()
     if (isOllama()) {
         QList<RegistryClient::Model> sorted = m_ollamaResults;
         applySort(sorted);
-        for (const RegistryClient::Model &model : sorted) {
+        for (const RegistryClient::Model &model : std::as_const(sorted)) {
             if (!filterlogic::hasCapabilities(model.capabilities, m_filters.capabilities))
                 continue;
             if (!filterlogic::fitsMaxParams(model.sizes, m_filters.maxParamsB))
@@ -470,11 +417,11 @@ void DiscoverPanel::rebuildItems()
         }
     } else {
         const QString uploader = m_filters.uploader.trimmed().toLower();
-        for (const HfClient::Repo &repo : m_hfResults) {
+        for (const HfClient::Repo &repo : std::as_const(m_hfResults)) {
             const QStringList caps = filterlogic::hfTagsToCapabilities(repo.tags);
             if (!filterlogic::hasCapabilities(caps, m_filters.capabilities))
                 continue;
-            if (!uploader.isEmpty() && !repo.id.toLower().contains(uploader))
+            if (!uploader.isEmpty() && !repo.id.contains(uploader, Qt::CaseInsensitive))
                 continue;
 
             BrowserItem item;
@@ -484,7 +431,7 @@ void DiscoverPanel::rebuildItems()
             item.subtitle = slash >= 0 ? repo.id.left(slash) : QString();
             item.badges = QStringList{QStringLiteral("gguf")} + caps;
             item.stats = T("browser.stats")
-                    .arg(shortNumber(repo.downloads), shortNumber(repo.likes));
+                    .arg(format::compactCount(quint64(qMax<qint64>(repo.downloads, 0))), format::compactCount(quint64(qMax<qint64>(repo.likes, 0))));
             items.append(item);
         }
     }
@@ -494,11 +441,11 @@ void DiscoverPanel::rebuildItems()
                                        : T("search.modelsFound").arg(items.size()));
 }
 
-void DiscoverPanel::refreshInstalled()
+void DiscoverPanel::applyInstalledList(const QList<OllamaCli::ModelInfo> &models)
 {
     m_installedNames.clear();
     m_localIds.clear();
-    for (const OllamaCli::ModelInfo &model : m_cli->listModels()) {
+    for (const OllamaCli::ModelInfo &model : models) {
         m_installedNames.insert(model.name);
         // The id is the manifest digest `ollama list` printed: the local side
         // of the update comparison.
@@ -509,7 +456,6 @@ void DiscoverPanel::refreshInstalled()
 void DiscoverPanel::onItemSelected(const QString &itemId)
 {
     m_pendingItemId = itemId;
-    refreshInstalled();
     if (isOllama()) {
         m_panel->setStatus(T("search.loadingTags"));
         m_registry->listTags(itemId);
@@ -526,16 +472,23 @@ void DiscoverPanel::onItemSelected(const QString &itemId)
 void DiscoverPanel::onAction(const QString &itemId, const QString &variantId)
 {
     if (isOllama()) {
-        if (variantId.isEmpty() || m_cli->isPulling())
+        if (variantId.isEmpty() || m_pullJob)
             return;
-        m_pullingName = variantId;
         m_panel->setBusy(true, -1);
-        m_panel->setStatus(T("search.pulling").arg(variantId));
+        // Another tab may be pulling: ours waits in the CLI queue instead of
+        // killing that download (B-2).
+        m_panel->setStatus(m_cli->isPulling() ? T("search.pullQueued").arg(variantId)
+                                              : T("search.pulling").arg(variantId));
         // The tag size from the registry is the intended download total; the
         // parser uses it so the bar does not restart for every layer. Both the
         // registry figure and the CLI lines use decimal units.
-        m_cli->pullModelAsync(variantId,
-                              pullprogress::parseSizeBytes(m_panel->selectedVariantSizeText()));
+        OllamaJob *job = m_install->pullFromRegistry(
+                variantId, pullprogress::parseSizeBytes(m_panel->selectedVariantSizeText()));
+        m_pullJob = job;
+        connect(job, &OllamaJob::progress, this, &DiscoverPanel::onPullProgress);
+        connect(job, &OllamaJob::finished, this, [this, variantId](bool ok, const QString &output) {
+            onPullFinished(variantId, ok, output);
+        });
         return;
     }
 
@@ -603,6 +556,9 @@ void DiscoverPanel::startHfDownload(const QString &repo, const HfVariant &varian
 
     m_queuePartTotal = 0;
     m_queueLastPath.clear();
+    // Every shard from the same commit, and provenance records exactly that
+    // commit (empty when the repo info has not arrived: `main`, as before).
+    m_queueRevision = m_repoShas.value(repo);
     m_queueActive = true;
     m_cancelRequested = false;
     m_panel->setBusy(true, -1);
@@ -622,8 +578,8 @@ void DiscoverPanel::startNextPart()
     }
 
     // A retry after a failed part should not fetch the shards that already
-    // completed: a file with the expected size counts as done (there is no
-    // HTTP range resume, so a truncated file is simply fetched again).
+    // completed: a file with the expected size counts as done (an unfinished
+    // shard stays a `.part`, which HfClient resumes with an HTTP range).
     while (m_queueIndex < m_queueFiles.size()) {
         const QString localPath = QDir(defaultDownloadDir())
                 .filePath(QFileInfo(m_queueFiles.at(m_queueIndex)).fileName());
@@ -654,7 +610,8 @@ void DiscoverPanel::startNextPart()
     } else {
         m_panel->setStatus(T("browser.downloading").arg(m_queueFiles.at(m_queueIndex)));
     }
-    m_hf->download(m_pendingRepo, m_queueFiles.at(m_queueIndex), defaultDownloadDir());
+    m_hf->download(m_pendingRepo, m_queueFiles.at(m_queueIndex), defaultDownloadDir(),
+                   m_queueSizes.value(m_queueIndex), m_queueRevision);
 }
 
 void DiscoverPanel::stopHfQueue()
@@ -677,32 +634,38 @@ void DiscoverPanel::finishHfDownload()
                          : QFileInfo(m_queueFirstFile).fileName();
     from = QDir(dir).filePath(from);
 
-    QString content = QStringLiteral("FROM ") + from + QLatin1Char('\n');
+    // Quoted when the path has spaces (ModelfileBuilder::fromLine).
+    QString content = ModelfileBuilder::fromLine(from);
     if (m_queueFiles.size() > m_queueMainCount) {
         const QString projector = m_queueFiles.at(m_queueMainCount);
         const QString projectorFrom = QDir(dir).filePath(splitWildcardPattern(projector));
-        content += QStringLiteral("FROM ") + projectorFrom + QLatin1Char('\n');
+        content += ModelfileBuilder::fromLine(projectorFrom);
     }
-    // Remember every downloaded shard (main + projector) before the queue is
+    InstallService::HfImport request;
+    request.name = name;
+    request.modelfile = content;
+    request.repo = m_pendingRepo;
+    request.file = m_queueFirstFile;
+    request.sha = m_queueRevision.isEmpty() ? m_repoShas.value(m_pendingRepo) : m_queueRevision;
+    // Every downloaded shard (main + projector), taken before the queue is
     // cleared: they are deleted once `ollama create` has copied them.
-    m_pendingCreateSources.clear();
-    for (const QString &file : std::as_const(m_queueFiles)) {
-        m_pendingCreateSources << QDir(dir).filePath(QFileInfo(file).fileName());
-    }
+    for (const QString &file : std::as_const(m_queueFiles))
+        request.sources << QDir(dir).filePath(QFileInfo(file).fileName());
     stopHfQueue();
 
     // The GGUF is on disk, but Ollama cannot use it until `ollama create`
     // imports it (a 100 GB split takes minutes). Keep the "on device" mark off
-    // until that finishes; the CLI signal does the rest.
-    m_pendingCreateName = name;
-    m_pendingCreateRepo = m_pendingRepo;
-    m_pendingCreateFile = m_queueFirstFile;
-
+    // until our job finishes — an editor update finishing first is not ours.
     // `ollama create` on a 100 GB model takes minutes: show a running bar and
     // lock the picker, but hide "Cancel" — the import cannot be interrupted.
     m_panel->setBusy(true, -1, false);
     m_panel->setStatus(T("browser.creating").arg(name));
-    emit modelCreateRequested(name, content);
+    OllamaJob *job = m_install->importHf(request);
+    m_createJob = job;
+    connect(job, &OllamaJob::finished, this, [this, job, name](bool ok, const QString &output) {
+        onCreateFinished(name, ok, output,
+                         job->property(InstallService::kFreedBytes).toULongLong());
+    });
 }
 
 void DiscoverPanel::applyHfVariants(const QString &itemId)
@@ -819,7 +782,7 @@ bool DiscoverPanel::hfVariantInstalled(const QString &repo, const QString &first
     // from, which survives a rename and an older naming scheme. Two quants of
     // one repo (`IQ4_XS` and `IQ4_XS-MTP`) must not mark each other.
     for (const QString &name : std::as_const(m_installedNames)) {
-        const Provenance::Entry entry = Provenance::instance().lookup(name);
+        const Provenance::Entry entry = m_install->provenance()->lookup(name);
         if (entry.source != QLatin1String("hf") || entry.ref != repo)
             continue;
         if (entry.file.isEmpty() || !sameGgufVariant(entry.file, firstFile))
@@ -834,7 +797,7 @@ bool DiscoverPanel::hfVariantInstalled(const QString &repo, const QString &first
     // file (the legacy `:iq4_xs` model was built from the MTP parts), and the
     // name alone would mark the wrong row.
     if (m_installedNames.contains(localName)
-            && Provenance::instance().lookup(localName).isEmpty()) {
+            && m_install->provenance()->lookup(localName).isEmpty()) {
         if (installedSha)
             installedSha->clear();
         return true;
@@ -845,8 +808,9 @@ bool DiscoverPanel::hfVariantInstalled(const QString &repo, const QString &first
 void DiscoverPanel::onCancel()
 {
     if (isOllama()) {
-        if (m_cli->isPulling())
-            m_cli->cancelPull();
+        // Only our own pull: the editor's download is not this tab's to stop.
+        if (m_pullJob)
+            m_pullJob->cancel();
     } else {
         if (m_queueActive) {
             // Abort the part in flight; the queue stops when the reply reports
@@ -857,8 +821,8 @@ void DiscoverPanel::onCancel()
     }
 }
 
-void DiscoverPanel::onPullProgress(const QString &label, int percent, qint64 received,
-                                   qint64 total)
+void DiscoverPanel::onPullProgress(const QString &label, int percent,
+                                   qint64 received, qint64 total)
 {
     m_panel->setBusy(true, percent < 0 ? -1 : percent);
     if (total > 0) {
@@ -872,27 +836,43 @@ void DiscoverPanel::onPullProgress(const QString &label, int percent, qint64 rec
     }
 }
 
-void DiscoverPanel::onPullFinished(bool ok, const QString &output)
+void DiscoverPanel::onPullFinished(const QString &pulled, bool ok, const QString &output)
 {
+    // Called for this panel's own job only; InstallService has already
+    // recorded the provenance.
+    m_pullJob.clear();
     m_panel->setBusy(false, 0);
     if (!ok) {
         m_panel->setStatus(T("search.installFailed").arg(output));
         return;
     }
 
-    const QString pulled = m_pullingName;
-    Provenance::Entry entry;
-    entry.source = QStringLiteral("ollama");
-    entry.ref = m_pullingName;
-    Provenance::instance().record(m_pullingName, entry);
-
-    m_panel->setStatus(T("search.installed").arg(m_pullingName));
-    m_pullingName.clear();
-    refreshInstalled();
+    m_panel->setStatus(T("search.installed").arg(pulled));
+    m_installedNames.insert(pulled);
     // The pull just fetched the manifest the registry serves now, so the
     // variant flips to "скачано" (and an "обновить" mark disappears) without
     // reloading the tab.
     m_panel->setVariantState(m_pendingItemId, pulled, true, false);
+    emit installedChanged();
+}
+
+void DiscoverPanel::onCreateFinished(const QString &name, bool ok, const QString &output,
+                                     quint64 freed)
+{
+    // Our own import job; provenance and source cleanup are done already.
+    m_createJob.clear();
+    m_panel->setBusy(false, 0);
+    if (!ok) {
+        m_panel->setStatus(T("browser.createFailed").arg(output));
+        return;
+    }
+    // The full list follows via installedChanged → refresh → modelsListed.
+    m_installedNames.insert(name);
+    if (!m_pendingItemId.isEmpty())
+        applyHfVariants(m_pendingItemId);
+    m_panel->setStatus(freed > 0
+            ? T("browser.installedCleaned").arg(name, humanSize(qint64(freed)))
+            : T("search.installed").arg(name));
     emit installedChanged();
 }
 

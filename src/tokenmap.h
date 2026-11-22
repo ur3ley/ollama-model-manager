@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QList>
 #include <QPair>
+#include <QSet>
 #include <QString>
 
 /**
@@ -45,10 +46,18 @@ inline bool isValidDeviceName(const QString &name)
 class TokenMap
 {
 public:
-    void setTokens(const QList<QPair<QByteArray, QString>> &tokens);
+    /**
+     * adminDevices — устройства с флагом admin (S-3): им доступны и
+     * административные эндпоинты, когда прокси их ограничивает.
+     */
+    void setTokens(const QList<QPair<QByteArray, QString>> &tokens,
+                   const QSet<QString> &adminDevices = {});
 
     /** Device для открытого токена; пустая строка — токен не принят. */
     QString deviceForToken(const QByteArray &token) const;
+
+    /** Есть ли у устройства (из deviceForToken) флаг admin. */
+    bool isAdmin(const QString &device) const;
 
     int size() const;
     void clear();
@@ -58,6 +67,7 @@ public:
 
 private:
     QHash<QByteArray, QString> m_devices;
+    QSet<QString> m_admins;
 };
 
 #endif // TOKENMAP_H

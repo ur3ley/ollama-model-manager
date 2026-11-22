@@ -2,7 +2,7 @@
 
 Документ описывает целевую архитектуру: менеджер сам проксирует Ollama, проверяет
 API-токены и работает как демон с трей-иконкой. Контейнер `ollama-auth` (nginx +
-podman) больше не нужен; его конфиг и юниты сохранены в `legacy/` для отката.
+podman) больше не нужен.
 
 ## Зачем
 
@@ -117,7 +117,7 @@ podman) больше не нужен; его конфиг и юниты сохр
 
 ### Режим `letsencrypt` (опция)
 
-Публично доверенный сертификат через Let's Encrypt и DNS-01 у deSEC (dedyn.io):
+Публично доверенный сертификат через Let's Encrypt и DNS-01 (например, deSEC):
 
 - токен deSEC со scope только на `_acme-challenge.<домен>` и сроком 4 месяца
   хранится в KWallet (папка `ollama-auth`, ключ `tls:desec-token`);
@@ -161,14 +161,34 @@ podman) больше не нужен; его конфиг и юниты сохр
 [proxy]
 enabled=true
 mode=interfaces          ; interfaces | all
-interfaces=eno1/192.0.2.10
+interfaces=eth0/192.0.2.10
 port=11434
 upstream=127.0.0.1:11434
 maxConnections=256
 tls=internal             ; off | internal | files | letsencrypt
 tls_cert=                ; для files
 tls_key=                 ; для files
+public_url=https://ollama.example.org  ; адрес для клиентов; пусто — из адреса прослушивания
+admin_api=restricted     ; restricted (по умолчанию) | open
 ```
+
+- `public_url` показывается в диалоге «API-токены», его DNS-имя попадает в SAN
+  внутреннего сертификата. Если ключа нет (конфиг старых версий), берётся DNS-имя из
+  уже выпущенного `tls/server.crt`, так что сертификат не перевыпускается.
+- `admin_api=restricted` (по умолчанию с 2026-11-22; ключа нет — тоже restricted, при
+  старте в журнале строка об этом) — токен без флага «Админ» (колонка в диалоге токенов, в
+  кошельке `admin:<device>`) получает только клиентский API: `/api/chat`, `/api/generate`,
+  `/api/embed[dings]`, `/api/show` (POST), `/api/tags`, `/api/ps`, `/api/version`, `/`
+  (GET/HEAD), `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`,
+  `/v1/models[/<name>]`. Остальное (`/api/delete|create|pull|push|copy|blobs`…) — `403`.
+  Пути сверяются точно: `%`-кодирование, `..`, лишние слэши отклоняются.
+  `admin_api=open` возвращает прежнее поведение: любой токен может всё.
+- Апстрим по умолчанию берётся из `OLLAMA_HOST` (как у CLI `ollama`), если в конфиге
+  нет `upstreamHost`/`upstreamPort`.
+- `tls=off` при прослушивании не-loopback адреса разрешён, но прокси пишет предупреждение
+  в журнал, а диалог настроек показывает его красным.
+- Каталог `~/.config/ollama-manager` создаётся с правами 0700, `config.ini` и `models.json` —
+  0600.
 
 Флаги командной строки перекрывают файл:
 
@@ -181,7 +201,7 @@ ollama-model-manager --show          # поднять окно работающ�
 ## systemd
 
 Готовый юнит лежит в `packaging/systemd/ollama-manager.service` (устанавливается в
-`share/ollama-manager/systemd`). Он headless (`--no-tray`) и с hardening:
+`share/ollama-model-manager/systemd`). Он headless (`--no-tray`) и с hardening:
 
 ```ini
 [Service]
@@ -200,7 +220,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 Установка:
 
 ```bash
-systemctl --user link /usr/local/share/ollama-manager/systemd/ollama-manager.service
+systemctl --user link /usr/local/share/ollama-model-manager/systemd/ollama-manager.service
 systemctl --user daemon-reload
 systemctl --user enable --now ollama-manager.service
 ```
@@ -213,7 +233,8 @@ single-instance не даст запуститься двум экземпляр
 
 ## Тесты
 
-`build/proxy-selftest` — 35 проверок, без сети и без Ollama: поднимает фейковый апстрим на
+Все офлайн-тесты: `ctest --output-on-failure` в каталоге сборки (см. README).
+`proxy-selftest` — 36 проверок, без сети и без Ollama: поднимает фейковый апстрим на
 `QTcpServer`, проверяет авторизацию, переписывание заголовков, стриминг, chunked-тела,
 лимиты и таймауты, отбраковку мусора, TLS-handshake/стриминг с собственным CA, бюджет
 соединений до и после handshake, symlink-политику. Отдельно — фаззинг парсера
@@ -243,4 +264,4 @@ single-instance не даст запуститься двум экземпляр
    `ollama.example.org`), reload nginx. Проброс остаётся `443 → 192.0.2.10:11434`.
 5. Контейнер `ollama-auth` не удалять, пока не пройдёт неделя эксплуатации.
 
-Откат — см. `legacy/README.md`.
+Откат — вернуть прежний контейнер `ollama-auth` (локальный архив, не входит в репозиторий).

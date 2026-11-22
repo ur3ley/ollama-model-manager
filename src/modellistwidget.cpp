@@ -1,7 +1,10 @@
 #include "modellistwidget.h"
 
+#include <QTimer>
+
 #include "carddelegate.h"
 #include "memoryinfo.h"
+#include "format.h"
 #include "provenance.h"
 #include "theme.h"
 
@@ -14,38 +17,40 @@
 #include <QSignalBlocker>
 #include <QStyle>
 
-namespace {
-
-QString formatSize(quint64 bytes)
-{
-    constexpr double gb = 1024.0 * 1024.0 * 1024.0;
-    const double gib = double(bytes) / gb;
-    if (gib >= 1024.0)
-        return QString::number(gib / 1024.0, 'f', 1) + QStringLiteral(" TB");
-    if (gib >= 1.0)
-        return QString::number(gib, 'f', gib < 10.0 ? 1 : 0) + QStringLiteral(" GB");
-    const double mib = double(bytes) / (1024.0 * 1024.0);
-    return QString::number(mib, 'f', 0) + QStringLiteral(" MB");
-}
-
-} // namespace
-
 ModelListWidget::ModelListWidget(OllamaCli *cli, QWidget *parent)
     : QWidget(parent), m_cli(cli)
 {
     setupUI();
-    connect(m_cli, &OllamaCli::createFinished, this, &ModelListWidget::refresh);
-    connect(m_cli, &OllamaCli::deleteFinished, this, &ModelListWidget::refresh);
-    connect(m_cli, &OllamaCli::copyFinished, this, &ModelListWidget::refresh);
-    connect(m_cli, &OllamaCli::renameFinished, this, &ModelListWidget::refresh);
+    // create/delete/copy/rename results refresh the list through
+    // MainWindow::onRefreshAll(); a second subscription here only doubled the
+    // `ollama list` runs. Errors are shown by the main window's status bar.
     connect(m_cli, &OllamaCli::modelsListed, this,
-            [this](bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &error) {
-        Q_UNUSED(error);
+            [this](bool ok, const QList<OllamaCli::ModelInfo> &models, const QString &) {
         m_refreshing = false;
         m_refreshBtn->setEnabled(true);
         m_refreshBtn->setText(T("list.refresh"));
         if (ok)
             populateList(models);
+        if (m_refreshAgain) {
+            m_refreshAgain = false;
+            refresh();
+        }
+    });
+    // A source bound, a model renamed or removed: the cards group by
+    // provenance, so regroup the list we have (A-3). A list request in flight
+    // regroups anyway — and an operation that changed provenance usually
+    // starts one within the same turn, hence the short delay before checking.
+    connect(&Provenance::instance(), &Provenance::changed, this, [this](const QString &) {
+        if (m_regroupQueued || m_refreshing)
+            return;
+        m_regroupQueued = true;
+        QTimer::singleShot(150, this, [this]() {
+            m_regroupQueued = false;
+            if (m_refreshing || m_models.isEmpty())
+                return;
+            m_groups = groupInstalledModels(m_models, Provenance::instance());
+            applyGroups(false);
+        });
     });
 }
 
@@ -116,8 +121,10 @@ void ModelListWidget::retranslateUi()
 
 void ModelListWidget::refresh()
 {
-    if (m_refreshing)
+    if (m_refreshing) {
+        m_refreshAgain = true;
         return;
+    }
     m_refreshing = true;
     m_refreshBtn->setEnabled(false);
     m_refreshBtn->setText(T("list.refreshing"));
@@ -126,6 +133,7 @@ void ModelListWidget::refresh()
 
 void ModelListWidget::populateList(const QList<OllamaCli::ModelInfo> &models)
 {
+    m_models = models;
     m_groups = groupInstalledModels(models, Provenance::instance());
     applyGroups(true);
     emit modelsLoaded();
@@ -138,7 +146,7 @@ void ModelListWidget::applyGroups(bool notify)
     {
         const QSignalBlocker blocker(m_list);
         m_list->clear();
-        for (const RepoGroup &group : m_groups) {
+        for (const RepoGroup &group : std::as_const(m_groups)) {
             auto *item = new QListWidgetItem(m_list);
             item->setText(group.title);
             item->setData(cardrole::Id, group.id);
@@ -205,7 +213,7 @@ QString ModelListWidget::statsFor(const RepoGroup &group) const
         }
     }
     const QString count = QString::number(group.quants.size());
-    return known ? count + QStringLiteral(" · ") + formatSize(total) : count;
+    return known ? count + QStringLiteral(" · ") + format::byteSize(qint64(total)) : count;
 }
 
 QString ModelListWidget::currentGroupId() const
@@ -275,7 +283,7 @@ void ModelListWidget::selectRepo(const QString &id)
     }
 }
 
-void ModelListWidget::onContextMenu(const QPoint &pos)
+void ModelListWidget::onContextMenu(QPoint pos)
 {
     QListWidgetItem *item = m_list->itemAt(pos);
     if (!item)

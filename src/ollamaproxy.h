@@ -39,7 +39,45 @@ struct ProxyConfig {
     bool tlsEnabled = false;
     QString tlsCertPath;
     QString tlsKeyPath;
+
+    // S-3: токену без флага admin доступен только клиентский API
+    // (isClientApiRequest); false — прежнее поведение «токен может всё».
+    bool restrictAdminApi = false;
 };
+
+/**
+ * Клиентский API Ollama — то, что нужно чату/IDE/эмбеддингам и не меняет
+ * хранилище моделей. Сверка по точному пути (query отбрасывается): любая
+ * экзотика — %-кодирование, "..", лишние слэши — не совпадёт и будет
+ * отклонена, а не «проскочит» к /api/delete на стороне роутера Ollama.
+ */
+inline bool isClientApiRequest(const QByteArray &method, const QByteArray &rawPath)
+{
+    QByteArray path = rawPath;
+    const int query = path.indexOf('?');
+    if (query >= 0)
+        path.truncate(query);
+
+    const bool read = method == "GET" || method == "HEAD";
+    const bool post = method == "POST";
+
+    if (read && (path == "/" || path == "/api/version" || path == "/api/tags"
+                 || path == "/api/ps" || path == "/v1/models"))
+        return true;
+    if (post && (path == "/api/chat" || path == "/api/generate" || path == "/api/embed"
+                 || path == "/api/embeddings" || path == "/api/show"
+                 || path == "/v1/chat/completions" || path == "/v1/completions"
+                 || path == "/v1/embeddings" || path == "/v1/responses"))
+        return true;
+    // GET /v1/models/<name>: имя модели без '/', '%' и "..".
+    static const QByteArray modelsPrefix("/v1/models/");
+    if (read && path.startsWith(modelsPrefix)) {
+        const QByteArray name = path.mid(modelsPrefix.size());
+        return !name.isEmpty() && !name.contains('/') && !name.contains('%')
+               && !name.contains("..");
+    }
+    return false;
+}
 
 /**
  * Годится ли строка как адрес апстрима: литерал IP (QHostAddress) либо

@@ -26,7 +26,7 @@ public:
     explicit StartPageHeader(OllamaCli *cli, QWidget *parent = nullptr);
 
     /** Totals from ModelListWidget::summary(); meters are re-read. */
-    void updateSummary(const InstalledSummary &summary);
+    void updateSummary(InstalledSummary summary);
 
 signals:
     void downloadRequested();
@@ -43,6 +43,10 @@ private:
     void refreshMemory();
     /** Rebuild every string from the stored numbers (used by language switch). */
     void render();
+    /** Binary found and the last `ollama list` reached the daemon. */
+    bool ollamaHealthy() const;
+    /** "not found" or "not responding", whichever applies. */
+    QString ollamaProblem() const;
 
     OllamaCli *m_cli;
     QLabel *m_title;
@@ -55,9 +59,12 @@ private:
     QPushButton *m_downloadBtn;
     QTimer *m_tick = nullptr;
     int m_diskTicks = 0;
+    int m_statusTicks = 0;
 
     InstalledSummary m_summary;
-    bool m_ollamaOk = false;
+    bool m_ollamaOk = false;       // binary found
+    bool m_daemonOk = true;        // last `ollama list` succeeded (unknown = ok)
+    QString m_daemonError;
     QString m_ollamaPath;
     quint64 m_diskUsedBytes = 0;
     quint64 m_diskTotalBytes = 0;

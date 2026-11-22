@@ -95,7 +95,7 @@ int scalarSize(quint32 type)
     }
 }
 
-bool skipArray(QDataStream &ds);
+bool skipArray(QDataStream &ds, int depth = 0);
 
 // Consumes one value of `type`. When `out` is non-null and the value is a
 // scalar string/integer, the value is stored there.
@@ -145,7 +145,11 @@ bool consumeValue(QDataStream &ds, quint32 type, Value *out)
     return false; // unknown value type
 }
 
-bool skipArray(QDataStream &ds)
+// The spec allows arrays of arrays; a bounded depth keeps a hostile file from
+// recursing without end (B-14).
+constexpr int kMaxArrayDepth = 4;
+
+bool skipArray(QDataStream &ds, int depth)
 {
     quint32 elemType = 0;
     quint64 count = 0;
@@ -164,6 +168,14 @@ bool skipArray(QDataStream &ds)
     if (elemType == T_STRING) {
         for (quint64 i = 0; i < count; ++i) {
             if (!skipString(ds))
+                return false;
+        }
+        return true;
+    }
+
+    if (elemType == T_ARRAY && depth < kMaxArrayDepth) {
+        for (quint64 i = 0; i < count; ++i) {
+            if (!skipArray(ds, depth + 1))
                 return false;
         }
         return true;

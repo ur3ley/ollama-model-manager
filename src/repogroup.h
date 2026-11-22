@@ -5,7 +5,7 @@
 #include <QString>
 #include <QStringList>
 
-#include "ollamacli.h"
+#include "ollamatypes.h"
 
 class Provenance;
 
@@ -46,7 +46,7 @@ struct RepoGroup {
     QString originalRefOf(const QString &modelName) const;
 };
 
-QList<RepoGroup> groupInstalledModels(const QList<OllamaCli::ModelInfo> &models,
+QList<RepoGroup> groupInstalledModels(const QList<OllamaModelInfo> &models,
                                       const Provenance &prov);
 
 #endif // REPOGROUP_H

@@ -9,13 +9,25 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
-#include <QSharedPointer>
 #include <QtNetwork/QNetworkRequest>
 #include <QUrlQuery>
 
 namespace {
 
 const char *kHubBase = "https://huggingface.co";
+QString g_hubBaseOverride;  // tests only: a local HTTP server instead of the Hub
+
+QString hubBase()
+{
+    return g_hubBaseOverride.isEmpty() ? QString::fromLatin1(kHubBase) : g_hubBaseOverride;
+}
+
+// Revision a `.part` was downloaded from: a resume must never append bytes of
+// another commit to it (B-10).
+QString revisionPath(const QString &partPath)
+{
+    return partPath + QStringLiteral(".rev");
+}
 
 QRegularExpression splitRe()
 {
@@ -40,6 +52,11 @@ QRegularExpression quantRe()
 }
 
 // See RegistryClient: aborting a finished reply emits `finished` synchronously.
+// No bytes for this long aborts a download (QNetworkRequest transfer timeout).
+constexpr int kDownloadStallMs = 60000;
+// Marks a reply aborted by cancelDownload(), as opposed to the stall timeout.
+constexpr char kUserCancelProperty[] = "ommUserCancel";
+
 QNetworkReply *disposeReply(QNetworkReply *&member, QObject *owner)
 {
     QNetworkReply *reply = member;
@@ -53,6 +70,17 @@ QNetworkReply *disposeReply(QNetworkReply *&member, QObject *owner)
 }
 
 } // namespace
+
+struct HfClient::DownloadState {
+    QFile *out = nullptr;      // the `.part`, owned by HfClient until finished
+    qint64 offset = 0;         // bytes already on disk when the body started
+    bool probed = false;       // first data chunk seen (Range honoured or not)
+    QString writeError;        // first failed write: abort, never rename
+    QString finalPath;
+    QString partPath;
+    qint64 expectedSize = 0;
+    int redirectsLeft = 10;
+};
 
 HfClient::HfClient(QObject *parent)
     : QObject(parent)
@@ -94,13 +122,50 @@ bool HfClient::isAuthError(const QString &error)
 QNetworkRequest HfClient::requestFor(const QUrl &url, const QString &token)
 {
     QNetworkRequest request(url);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("ollama-model-manager"));
     const QString value = normalizeToken(token);
+    // S-2: Qt copies every header, Authorization included, to the redirect
+    // target. Anonymous requests may follow any https redirect; with a token
+    // only same-origin ones (API redirects of renamed repos stay on the Hub).
+    // Downloads, which do hop to the CDN, handle redirects by hand.
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         value.isEmpty() ? QNetworkRequest::NoLessSafeRedirectPolicy
+                                         : QNetworkRequest::SameOriginRedirectPolicy);
     if (!value.isEmpty())
         request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + value.toUtf8());
     return request;
+}
+
+bool HfClient::sameOrigin(const QUrl &a, const QUrl &b)
+{
+    const auto defaultPort = [](const QUrl &url) {
+        return url.port(url.scheme() == QLatin1String("http") ? 80 : 443);
+    };
+    return a.scheme() == b.scheme()
+            && a.host().compare(b.host(), Qt::CaseInsensitive) == 0
+            && defaultPort(a) == defaultPort(b);
+}
+
+QNetworkRequest HfClient::redirectRequestFor(const QNetworkRequest &previous, const QUrl &target)
+{
+    if (sameOrigin(previous.url(), target)) {
+        // Still the Hub: the token is needed and stays, redirects stay manual.
+        QNetworkRequest next(previous);
+        next.setUrl(target);
+        return next;
+    }
+    // Another host (CDN, presigned storage URL): everything but the token.
+    QNetworkRequest next(target);
+    const QList<QByteArray> headers = previous.rawHeaderList();
+    for (const QByteArray &name : headers) {
+        if (name.compare("Authorization", Qt::CaseInsensitive) != 0)
+            next.setRawHeader(name, previous.rawHeader(name));
+    }
+    next.setTransferTimeout(previous.transferTimeout());
+    // Nothing secret is left to leak, so Qt may follow further hops itself.
+    next.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                      QNetworkRequest::NoLessSafeRedirectPolicy);
+    return next;
 }
 
 QString HfClient::networkError(QNetworkReply *reply)
@@ -116,7 +181,7 @@ void HfClient::search(const QString &query, int limit, const QString &sort)
 {
     disposeReply(m_search, this);
 
-    QUrl url(QString::fromLatin1(kHubBase) + QStringLiteral("/api/models"));
+    QUrl url(hubBase() + QStringLiteral("/api/models"));
     QUrlQuery params;
     params.addQueryItem(QStringLiteral("search"), query);
     params.addQueryItem(QStringLiteral("filter"), QStringLiteral("gguf"));
@@ -143,7 +208,7 @@ void HfClient::listFiles(const QString &repo)
 {
     disposeReply(m_files, this);
 
-    QUrl url(QString::fromLatin1(kHubBase) + QStringLiteral("/api/models/") + repo);
+    QUrl url(hubBase() + QStringLiteral("/api/models/") + repo);
     url.setQuery(QStringLiteral("blobs=true"));
     QNetworkReply *reply = get(url);
     m_files = reply;
@@ -159,7 +224,13 @@ void HfClient::listFiles(const QString &repo)
     });
 }
 
-void HfClient::download(const QString &repo, const QString &file, const QString &destDir)
+void HfClient::setHubBaseForTest(const QString &base)
+{
+    g_hubBaseOverride = base;
+}
+
+void HfClient::download(const QString &repo, const QString &file, const QString &destDir,
+                        qint64 expectedSize, const QString &revision)
 {
     if (m_download)
         cancelDownload();
@@ -181,7 +252,19 @@ void HfClient::download(const QString &repo, const QString &file, const QString 
     // with an HTTP range request instead of downloading tens of gigabytes
     // again. The final file appears only after the body was received whole, so
     // a leftover `.part` is never mistaken for a finished shard.
-    const qint64 alreadyOnDisk = QFileInfo(partPath).exists() ? QFileInfo(partPath).size() : 0;
+    qint64 alreadyOnDisk = QFileInfo::exists(partPath) ? QFileInfo(partPath).size() : 0;
+    // A `.part` of another commit cannot be continued: start over. A `.part`
+    // without a recorded revision (older versions) is resumed as before.
+    const QString revFile = revisionPath(partPath);
+    if (!revision.isEmpty()) {
+        QFile rev(revFile);
+        if (alreadyOnDisk > 0 && rev.open(QIODevice::ReadOnly)
+                && QString::fromLatin1(rev.readAll()).trimmed() != revision)
+            alreadyOnDisk = 0;
+        rev.close();
+        if (rev.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            rev.write(revision.toLatin1());
+    }
     auto *out = new QFile(partPath, this);
     QIODevice::OpenMode openMode = QIODevice::WriteOnly;
     openMode |= alreadyOnDisk > 0 ? QIODevice::Append : QIODevice::Truncate;
@@ -191,60 +274,176 @@ void HfClient::download(const QString &repo, const QString &file, const QString 
         emit downloadFinished(false, QString(), err);
         return;
     }
-    const auto offset = QSharedPointer<qint64>::create(alreadyOnDisk);
-    const auto probed = QSharedPointer<bool>::create(false);
+    auto state = std::make_shared<DownloadState>();
+    state->out = out;
+    state->offset = alreadyOnDisk;
+    state->finalPath = finalPath;
+    state->partPath = partPath;
+    state->expectedSize = expectedSize;
 
-    const QUrl url(QString::fromLatin1(kHubBase) + QLatin1Char('/') + repo
-                   + QStringLiteral("/resolve/main/") + file);
+    const QUrl url(hubBase() + QLatin1Char('/') + repo
+                   + QStringLiteral("/resolve/")
+                   + (revision.isEmpty() ? QStringLiteral("main") : revision)
+                   + QLatin1Char('/') + file);
     QNetworkRequest request = requestFor(url, m_token);
-    if (*offset > 0) {
+    // `/resolve/` answers 302 to a CDN host: with a token the hop is taken by
+    // hand so the token never reaches it (S-2, see redirectRequestFor()).
+    if (hasToken()) {
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                             QNetworkRequest::ManualRedirectPolicy);
+    }
+    // A stalled connection (no bytes for a minute) fails instead of hanging
+    // forever; the `.part` is kept, so a retry resumes.
+    request.setTransferTimeout(kDownloadStallMs);
+    if (state->offset > 0) {
         request.setRawHeader("Range",
                              QByteArrayLiteral("bytes=")
-                                     + QByteArray::number(*offset) + QByteArrayLiteral("-"));
+                                     + QByteArray::number(state->offset) + QByteArrayLiteral("-"));
     }
+    startDownloadRequest(state, request);
+}
+
+void HfClient::startDownloadRequest(const std::shared_ptr<DownloadState> &state,
+                                    const QNetworkRequest &request)
+{
     QNetworkReply *reply = m_nam->get(request);
     m_download = reply;
 
-    connect(reply, &QNetworkReply::readyRead, this, [reply, out, offset, probed]() {
-        if (!*probed) {
-            *probed = true;
+    connect(reply, &QNetworkReply::readyRead, this, [reply, state]() {
+        // Only 200/206 carry file data; an error page (416, 401, 5xx) or a
+        // redirect body must not reach the `.part` — finished() handles those.
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (!state->writeError.isEmpty() || (status != 200 && status != 206)) {
+            reply->readAll();
+            return;
+        }
+        QFile *out = state->out;
+        if (!state->probed) {
+            state->probed = true;
             // A server that ignores Range answers 200 with the whole body: drop
             // the partial bytes we were going to append to.
-            if (*offset > 0
-                && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 206) {
+            if (state->offset > 0 && status == 200) {
                 out->close();
                 if (out->open(QIODevice::WriteOnly | QIODevice::Truncate))
-                    *offset = 0;
+                    state->offset = 0;
             }
         }
-        out->write(reply->readAll());
+        const QByteArray chunk = reply->readAll();
+        if (out->write(chunk) != chunk.size()) {
+            state->writeError = out->errorString();
+            reply->abort();
+        }
     });
     connect(reply, &QNetworkReply::downloadProgress, this,
-            [this, offset](qint64 received, qint64 total) {
-        const qint64 done = *offset + received;
-        emit downloadProgress(done, total > 0 ? *offset + total : -1);
+            [this, reply, state](qint64 received, qint64 total) {
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status != 200 && status != 206)
+            return;  // a redirect hop, not the file
+        const qint64 done = state->offset + received;
+        emit downloadProgress(done, total > 0 ? state->offset + total : -1);
     });
-    connect(reply, &QNetworkReply::finished, this,
-            [this, reply, out, finalPath, partPath]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, state]() {
         if (m_download == reply)
             m_download = nullptr;
         reply->deleteLater();
 
-        if (reply->error() != QNetworkReply::NoError) {
+        QFile *out = state->out;
+        const QString &finalPath = state->finalPath;
+        const QString &partPath = state->partPath;
+        const qint64 expectedSize = state->expectedSize;
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        // Manual redirect (token requests only): follow it ourselves, keeping
+        // the token on the Hub and dropping it for any other host.
+        const QUrl location = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
+        if (state->writeError.isEmpty() && reply->error() == QNetworkReply::NoError
+            && status >= 300 && status < 400 && location.isValid()) {
+            const QUrl target = reply->url().resolved(location);
+            QString redirectError;
+            if (--state->redirectsLeft < 0)
+                redirectError = QStringLiteral("too many redirects");
+            else if (reply->url().scheme() == QLatin1String("https")
+                     && target.scheme() != QLatin1String("https"))
+                redirectError = QStringLiteral("insecure redirect to ") + target.toString();
+            if (redirectError.isEmpty()) {
+                startDownloadRequest(state, redirectRequestFor(reply->request(), target));
+                return;
+            }
             out->close();
             out->deleteLater();
+            emit downloadFinished(false, QString(), redirectError);
+            return;
+        }
+
+        if (state->writeError.isEmpty() && reply->error() == QNetworkReply::NoError) {
+            // Anything still buffered in the reply after the last readyRead.
+            const QByteArray tail = reply->readAll();
+            if (out->write(tail) != tail.size() || !out->flush())
+                state->writeError = out->errorString();
+        }
+        out->close();
+        out->deleteLater();
+
+        if (!state->writeError.isEmpty()) {
+            // Keep the `.part`: what reached the disk is a valid prefix.
+            emit downloadFinished(false, QString(),
+                                  QStringLiteral("cannot write ") + partPath
+                                          + QStringLiteral(": ") + state->writeError);
+            return;
+        }
+
+        if (status == 416) {
+            // Range past the end: the `.part` is already complete — or longer
+            // than the file (another revision). Only a matching size is kept.
+            if (expectedSize > 0 && QFileInfo(partPath).size() == expectedSize) {
+                QFile::remove(finalPath);
+                if (QFile::rename(partPath, finalPath)) {
+                    QFile::remove(revisionPath(partPath));
+                    emit downloadFinished(true, finalPath, QString());
+                    return;
+                }
+                emit downloadFinished(false, QString(),
+                                      QStringLiteral("cannot rename ") + partPath);
+                return;
+            }
+            QFile::remove(partPath);
+            QFile::remove(revisionPath(partPath));
+            emit downloadFinished(false, QString(),
+                                  QStringLiteral("HTTP 416: the partial file did not match "
+                                                 "and was discarded, retry to download again"));
+            return;
+        }
+
+        if (reply->error() != QNetworkReply::NoError) {
             // Keep the `.part`: the next attempt resumes from its length.
-            const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError;
+            // A stall timeout also reports OperationCanceledError; only an
+            // abort through cancelDownload() is a user cancel.
+            const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError
+                    && reply->property(kUserCancelProperty).toBool();
+            const bool stalled = reply->error() == QNetworkReply::OperationCanceledError
+                    && !cancelled;
             emit downloadFinished(false, QString(),
                                   cancelled ? QStringLiteral("cancelled")
+                                  : stalled ? QStringLiteral("download stalled: no data for %1 s")
+                                                      .arg(kDownloadStallMs / 1000)
                                             : networkError(reply));
             return;
         }
 
-        // Anything still buffered in the reply after the last readyRead.
-        out->write(reply->readAll());
-        out->close();
-        out->deleteLater();
+        if (expectedSize > 0) {
+            const qint64 got = QFileInfo(partPath).size();
+            if (got != expectedSize) {
+                // Longer than announced cannot be resumed into anything valid.
+                if (got > expectedSize) {
+                    QFile::remove(partPath);
+                    QFile::remove(revisionPath(partPath));
+                }
+                emit downloadFinished(false, QString(),
+                                      QStringLiteral("size mismatch: got %1 of %2 bytes")
+                                              .arg(got).arg(expectedSize));
+                return;
+            }
+        }
 
         QFile::remove(finalPath);
         if (!QFile::rename(partPath, finalPath)) {
@@ -252,14 +451,17 @@ void HfClient::download(const QString &repo, const QString &file, const QString 
                                   QStringLiteral("cannot rename ") + partPath);
             return;
         }
+        QFile::remove(revisionPath(partPath));
         emit downloadFinished(true, finalPath, QString());
     });
 }
 
 void HfClient::cancelDownload()
 {
-    if (m_download)
+    if (m_download) {
+        m_download->setProperty(kUserCancelProperty, true);
         m_download->abort();
+    }
 }
 
 QList<HfClient::Repo> HfClient::parseSearch(const QByteArray &json)
@@ -269,7 +471,8 @@ QList<HfClient::Repo> HfClient::parseSearch(const QByteArray &json)
     if (!doc.isArray())
         return repos;
 
-    for (const QJsonValue &value : doc.array()) {
+    const QJsonArray items = doc.array();
+    for (const QJsonValue &value : items) {
         const QJsonObject obj = value.toObject();
         const QString id = obj.value(QStringLiteral("id")).toString();
         if (id.isEmpty())
@@ -280,7 +483,8 @@ QList<HfClient::Repo> HfClient::parseSearch(const QByteArray &json)
         repo.likes = qint64(obj.value(QStringLiteral("likes")).toDouble());
         repo.sha = obj.value(QStringLiteral("sha")).toString();
         repo.lastModified = obj.value(QStringLiteral("lastModified")).toString();
-        for (const QJsonValue &tag : obj.value(QStringLiteral("tags")).toArray())
+        const QJsonArray tags = obj.value(QStringLiteral("tags")).toArray();
+        for (const QJsonValue &tag : tags)
             repo.tags.append(tag.toString());
         repos.append(repo);
     }
@@ -336,7 +540,7 @@ void HfClient::fetchRepoInfo(const QString &repo)
 {
     disposeReply(m_repoInfo, this);
 
-    QUrl url(QString::fromLatin1(kHubBase) + QStringLiteral("/api/models/") + repo);
+    QUrl url(hubBase() + QStringLiteral("/api/models/") + repo);
     QNetworkReply *reply = get(url);
     m_repoInfo = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, repo]() {

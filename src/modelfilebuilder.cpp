@@ -9,11 +9,30 @@ ModelfileBuilder::Config ModelfileBuilder::defaultConfig()
     return c;
 }
 
-QString ModelfileBuilder::build(const Config &config)
+bool ModelfileBuilder::breaksTripleQuotes(const QString &value)
 {
+    return value.contains(QLatin1String("\"\"\""));
+}
+
+QString ModelfileBuilder::build(const Config &config, QString *error)
+{
+    const bool systemUsed = config.enableSystemPrompt && !config.systemPrompt.isEmpty();
+    if (systemUsed && breaksTripleQuotes(config.systemPrompt)) {
+        if (error)
+            *error = QStringLiteral("SYSTEM");
+        return QString();
+    }
+    if (breaksTripleQuotes(config.templateStr)) {
+        if (error)
+            *error = QStringLiteral("TEMPLATE");
+        return QString();
+    }
+    if (error)
+        error->clear();
+
     QString result;
 
-    result += "FROM " + config.from + "\n";
+    result += fromLine(config.from);
 
     if (config.enableNumCtx && config.numCtx > 0) {
         result += "PARAMETER num_ctx " + QString::number(config.numCtx) + "\n";
@@ -46,7 +65,7 @@ QString ModelfileBuilder::build(const Config &config)
         result += "PARAMETER " + it.key() + " " + it.value() + "\n";
     }
 
-    if (config.enableSystemPrompt && !config.systemPrompt.isEmpty()) {
+    if (systemUsed) {
         result += "SYSTEM \"\"\"\n";
         result += config.systemPrompt;
         result += "\n\"\"\"\n";
@@ -65,4 +84,15 @@ QString ModelfileBuilder::build(const Config &config)
         result += "PARSER " + config.parser + "\n";
 
     return result;
+}
+
+QString ModelfileBuilder::fromLine(const QString &value)
+{
+    bool hasSpace = false;
+    for (qsizetype i = 0; i < value.size() && !hasSpace; ++i)
+        hasSpace = value.at(i).isSpace();
+    // Ollama has no escape inside "…": a path with a quote stays unquoted.
+    if (hasSpace && !value.contains(QLatin1Char('"')))
+        return QStringLiteral("FROM \"") + value + QStringLiteral("\"\n");
+    return QStringLiteral("FROM ") + value + QLatin1Char('\n');
 }

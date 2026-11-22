@@ -1,4 +1,5 @@
 #include "bindsourcedialog.h"
+#include "format.h"
 
 #include "designtokens.h"
 #include "hfauth.h"
@@ -18,20 +19,6 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
-namespace {
-
-QString humanSize(qint64 bytes)
-{
-    constexpr double gb = 1024.0 * 1024.0 * 1024.0;
-    if (bytes <= 0)
-        return QString();
-    const double value = double(bytes) / gb;
-    if (value >= 1.0)
-        return QString::number(value, 'f', value < 10.0 ? 1 : 0) + QStringLiteral(" GB");
-    return QString::number(double(bytes) / (1024.0 * 1024.0), 'f', 0) + QStringLiteral(" MB");
-}
-
-} // namespace
 
 // ---------------------------------------------------------------- auto binder
 
@@ -569,9 +556,9 @@ void BindSourceDialog::onHfFiles(bool ok, const QList<HfClient::File> &files,
             continue;
         gguf << file;
     }
-    for (const HfClient::File &file : gguf) {
+    for (const HfClient::File &file : std::as_const(gguf)) {
         QString text = file.name;
-        const QString size = humanSize(file.size);
+        const QString size = format::byteSize(file.size);
         if (!size.isEmpty())
             text += QStringLiteral("   ") + size;
         auto *item = new QListWidgetItem(text, m_hfFiles);

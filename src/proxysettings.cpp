@@ -1,6 +1,8 @@
 #include "proxysettings.h"
 
+#include "apppaths.h"
 #include "ollamaproxy.h"
+#include "tlsmanager.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -9,6 +11,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTcpServer>
+#include <QUrl>
 
 #include <utility>
 
@@ -33,8 +36,7 @@ QString ProxySettings::configPath()
 {
     if (!g_configPathOverride.isEmpty())
         return g_configPathOverride;
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-    return QDir(base).filePath(QStringLiteral("ollama-manager/config.ini"));
+    return apppaths::configFile();
 }
 
 void ProxySettings::setConfigPathOverride(const QString &path)
@@ -42,10 +44,41 @@ void ProxySettings::setConfigPathOverride(const QString &path)
     g_configPathOverride = path;
 }
 
+bool ProxySettings::parseOllamaHost(const QString &value, QString *host, quint16 *port)
+{
+    QString text = value.trimmed();
+    if (text.isEmpty())
+        return false;
+    // OLLAMA_HOST accepts "host", "host:port" and "scheme://host:port".
+    if (!text.contains(QStringLiteral("://")))
+        text.prepend(QStringLiteral("http://"));
+    const QUrl url(text);
+    QString h = url.host();
+    if (!url.isValid() || h.isEmpty())
+        return false;
+    // The daemon's bind-all address is reached through loopback.
+    if (h == QLatin1String("0.0.0.0") || h == QLatin1String("::"))
+        h = QString::fromLatin1(kDefaultUpstreamHost);
+    if (!isValidUpstreamHost(h))
+        return false;
+    *host = h;
+    *port = quint16(url.port(11434));
+    return true;
+}
+
 ProxySettings ProxySettings::load()
 {
     ProxySettings s;
     const QString path = configPath();
+
+    // Defaults for the upstream follow OLLAMA_HOST, as the ollama CLI does
+    // (D-7); an explicit upstreamHost/upstreamPort in the config wins.
+    QString envHost;
+    quint16 envPort = 0;
+    if (parseOllamaHost(qEnvironmentVariable("OLLAMA_HOST"), &envHost, &envPort)) {
+        s.upstreamHost = envHost;
+        s.upstreamPort = envPort;
+    }
 
     QSettings ini(path, QSettings::IniFormat);
     ini.beginGroup(QLatin1String(kGroup));
@@ -94,6 +127,27 @@ ProxySettings ProxySettings::load()
     s.tlsCert = ini.value(QStringLiteral("tls_cert")).toString().trimmed();
     s.tlsKey = ini.value(QStringLiteral("tls_key")).toString().trimmed();
 
+    if (ini.contains(QStringLiteral("public_url"))) {
+        s.publicUrl = ini.value(QStringLiteral("public_url")).toString().trimmed();
+    } else {
+        // Конфиг старше public_url: раньше DNS-имя было зашито в код и уже
+        // стоит в SAN выпущенного сертификата. Берём его оттуда, чтобы
+        // обновление не перевыпустило сертификат без имени, по которому
+        // клиенты ходят к прокси. Сохранится при следующем save().
+        const QStringList names = TlsManager::leafDnsNames();
+        if (!names.isEmpty())
+            s.publicUrl = QStringLiteral("https://") + names.first();
+    }
+
+    // Нет ключа — закрыто (решение 2026-11-22): токенам без флага «Админ»
+    // админ-API недоступен. Открыть можно только явным admin_api=open.
+    s.adminApiImplicit = !ini.contains(QStringLiteral("admin_api"));
+    const QString adminApi = ini.value(QStringLiteral("admin_api"), QStringLiteral("restricted"))
+                                 .toString()
+                                 .trimmed()
+                                 .toLower();
+    s.restrictAdminApi = adminApi != QLatin1String("open");
+
     ini.endGroup();
 
     // Первый запуск: файла ещё нет — предлагаем все LAN-адреса. Иначе прокси
@@ -110,6 +164,9 @@ bool ProxySettings::save(QString *error) const
 
     const QFileInfo info(path);
     const QDir dir = info.absoluteDir();
+    // Свой каталог — 0700 (S-8); каталог из --config не трогаем.
+    if (path == apppaths::configFile())
+        apppaths::ensurePrivateDir(dir.absolutePath());
     if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
         if (error)
             *error = QStringLiteral("cannot create %1").arg(dir.absolutePath());
@@ -128,8 +185,13 @@ bool ProxySettings::save(QString *error) const
     ini.setValue(QStringLiteral("tls"), tlsModeName(tls));
     ini.setValue(QStringLiteral("tls_cert"), tlsCert);
     ini.setValue(QStringLiteral("tls_key"), tlsKey);
+    ini.setValue(QStringLiteral("public_url"), publicUrl);
+    ini.setValue(QStringLiteral("admin_api"),
+                 QString::fromLatin1(restrictAdminApi ? "restricted" : "open"));
     ini.endGroup();
     ini.sync();
+    // Топология сети — не для чужих глаз (S-8).
+    apppaths::restrictFile(path);
 
     if (ini.status() != QSettings::NoError) {
         if (error)
@@ -173,6 +235,47 @@ QString ProxySettings::describe() const
     for (const QString &address : addresses)
         parts.append(formatEndpoint(address, port));
     return parts.join(QStringLiteral(", "));
+}
+
+QString ProxySettings::endpoint() const
+{
+    if (!publicUrl.isEmpty())
+        return publicUrl;
+
+    QString host;
+    if (mode == AllInterfaces) {
+        host = defaultAddresses().value(0, QStringLiteral("127.0.0.1"));
+    } else {
+        host = addresses.value(0).trimmed();
+    }
+    if (host.isEmpty())
+        return QString();
+    if (host.contains(QLatin1Char(':')))
+        host = QLatin1Char('[') + host + QLatin1Char(']');
+    const QString scheme = tls == TlsMode::Off ? QStringLiteral("http") : QStringLiteral("https");
+    return scheme + QStringLiteral("://") + host + QLatin1Char(':') + QString::number(port);
+}
+
+QString ProxySettings::publicDnsName() const
+{
+    const QString host = QUrl(publicUrl).host();
+    if (host.isEmpty() || !QHostAddress(host).isNull())
+        return QString();
+    return host;
+}
+
+bool ProxySettings::plaintextOnNetwork() const
+{
+    if (!enabled || tls != TlsMode::Off)
+        return false;
+    if (mode == AllInterfaces)
+        return true;
+    for (const QString &text : addresses) {
+        const QHostAddress address(text.trimmed());
+        if (!address.isNull() && !address.isLoopback())
+            return true;
+    }
+    return false;
 }
 
 QString ProxySettings::tlsModeName(TlsMode mode)

@@ -20,3 +20,6 @@ HISTORY.md
 JOURNAL.md
 NOTES.md
 tasks/
+
+# Local archive of old nginx/podman auth (not public)
+legacy/

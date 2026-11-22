@@ -1812,6 +1812,64 @@ void testUpstreamHostValidation()
     report("33. upstreamHost валидируется (L-8)", valid && invalid && refused, error);
 }
 
+void testAdminApiRestriction()
+{
+    // Чистая функция: точное совпадение пути, всё «хитрое» — отказ.
+    const bool clientOk = isClientApiRequest("POST", "/api/chat")
+                          && isClientApiRequest("POST", "/api/generate?stream=false")
+                          && isClientApiRequest("GET", "/api/tags")
+                          && isClientApiRequest("HEAD", "/")
+                          && isClientApiRequest("POST", "/v1/chat/completions")
+                          && isClientApiRequest("GET", "/v1/models/qwen3:8b");
+    const bool adminDenied = !isClientApiRequest("DELETE", "/api/delete")
+                             && !isClientApiRequest("POST", "/api/pull")
+                             && !isClientApiRequest("POST", "/api/create")
+                             && !isClientApiRequest("POST", "/api/copy")
+                             && !isClientApiRequest("POST", "/api/blobs/sha256:00")
+                             && !isClientApiRequest("GET", "/api/chat")
+                             && !isClientApiRequest("POST", "/api/%63hat")
+                             && !isClientApiRequest("POST", "/api/chat/../delete")
+                             && !isClientApiRequest("GET", "/v1/models/a/../../api/delete")
+                             && !isClientApiRequest("GET", "/v1/models/a%2F..");
+
+    // laptop — admin, phone — нет.
+    TokenMap tokens;
+    tokens.setTokens({{QByteArrayLiteral("secret-token-1"), QStringLiteral("laptop")},
+                      {QByteArrayLiteral("secret-token-2"), QStringLiteral("phone")}},
+                     {QStringLiteral("laptop")});
+    const auto request = [](const char *method, const char *path, const char *token) {
+        return QByteArray(method) + ' ' + path + " HTTP/1.1\r\nHost: proxy.test\r\n"
+               + bearer(token) + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    };
+
+    ProxyConfig restricted = baseConfig();
+    restricted.restrictAdminApi = true;
+    Fixture f(FakeUpstream::Normal, restricted, tokens);
+    const Response phoneTags = f.get(QByteArrayLiteral("/api/tags"), {bearer("secret-token-2")});
+    const Response phoneDelete = sendRequest(QHostAddress::LocalHost, f.proxy.listenPort(),
+                                             request("DELETE", "/api/delete", "secret-token-2"));
+    const Response laptopDelete = sendRequest(QHostAddress::LocalHost, f.proxy.listenPort(),
+                                              request("DELETE", "/api/delete", "secret-token-1"));
+
+    // По умолчанию (admin_api=open) — прежнее поведение.
+    Fixture open(FakeUpstream::Normal, baseConfig(), tokens);
+    const Response openDelete = sendRequest(QHostAddress::LocalHost, open.proxy.listenPort(),
+                                            request("DELETE", "/api/delete", "secret-token-2"));
+
+    report("34. admin API: allow-list + флаг admin (S-3)",
+           clientOk && adminDenied && f.started && phoneTags.status == 200
+                   && phoneDelete.status == 403 && laptopDelete.status == 200
+                   && openDelete.status == 200 && !tokens.isAdmin(QStringLiteral("phone"))
+                   && tokens.isAdmin(QStringLiteral("laptop")),
+           QStringLiteral("client=%1 denied=%2 tags=%3 phoneDel=%4 laptopDel=%5 openDel=%6")
+                   .arg(clientOk)
+                   .arg(adminDenied)
+                   .arg(phoneTags.status)
+                   .arg(phoneDelete.status)
+                   .arg(laptopDelete.status)
+                   .arg(openDelete.status));
+}
+
 } // namespace
 
 
@@ -1843,6 +1901,7 @@ int main(int argc, char **argv)
     testStrictContentLength();
     testParserTable();
     testUpstreamHostValidation();
+    testAdminApiRestriction();
 
     if (setupTls()) {
         testTlsHandshake();

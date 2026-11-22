@@ -37,6 +37,28 @@ struct ProxySettings
     QString tlsCert;                // только для Files
     QString tlsKey;
 
+    /**
+     * Адрес, по которому клиенты (OPNsense, устройства) ходят к прокси:
+     * [proxy] public_url. Показывается в диалоге токенов, его DNS-имя
+     * попадает в SAN внутреннего сертификата. Пусто — адрес вычисляется из
+     * адреса прослушивания (S-4: личный домен больше не зашит в код).
+     */
+    QString publicUrl;
+
+    /**
+     * [proxy] admin_api: true ("restricted", по умолчанию с 2026-11-22) —
+     * токен без флага admin получает только клиентский API
+     * (чат/генерация/эмбеддинги/список), а /api/delete, /api/create,
+     * /api/pull и т.п. — 403 (S-3); false ("open") — любой токен может всё.
+     * Ключа нет в конфиге (он старше этой настройки) — restricted.
+     */
+    bool restrictAdminApi = true;
+    /** Ключа admin_api в конфиге не было: значение взято по умолчанию. */
+    bool adminApiImplicit = false;
+
+    /** OLLAMA_HOST ("host", "host:port", "http://host:port") → upstream host/port. */
+    static bool parseOllamaHost(const QString &value, QString *host, quint16 *port);
+
     static QString tlsModeName(TlsMode mode);     // "off" | "internal" | ...
     static TlsMode tlsModeFromName(const QString &name, TlsMode fallback = TlsMode::Internal);
 
@@ -53,6 +75,18 @@ struct ProxySettings
 
     /** "192.0.2.10:11434" / "0.0.0.0:11435". */
     QString describe() const;
+
+    /** publicUrl, а если он пуст — <http|https>://<первый адрес>:<port>. */
+    QString endpoint() const;
+
+    /** DNS-имя из publicUrl для SAN; пусто, если publicUrl пуст или это IP. */
+    QString publicDnsName() const;
+
+    /**
+     * TLS выключен, а слушаем не только loopback: Bearer-токены пойдут по
+     * сети открытым текстом (S-5).
+     */
+    bool plaintextOnNetwork() const;
 
     /** true, если апстрим локальный и порт совпадает в режиме «Все интерфейсы». */
     bool conflictsWithLocalUpstream() const;

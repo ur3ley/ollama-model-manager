@@ -6,6 +6,7 @@
 //   ./modelfile-parse-selftest            → PASS/FAIL lines, exit 0/1
 //   ./modelfile-parse-selftest FILE       → dump parsed fields for FILE
 
+#include "modelfilebuilder.h"
 #include "ollamacli.h"
 
 #include <QCoreApplication>
@@ -114,6 +115,54 @@ int main(int argc, char *argv[])
     const QString lower = QStringLiteral("FROM x\nrenderer qwen3\n");
     checkEqual(OllamaCli::extractDirective(lower, QStringLiteral("RENDERER")),
                QString(), QStringLiteral("lower-case directive is not matched"));
+
+    // ModelfileBuilder: SYSTEM survives a build → extract round trip verbatim
+    // (blank lines, indentation), which the `ollama show` System section does not.
+    {
+        ModelfileBuilder::Config config;
+        config.from = QStringLiteral("qwen3:8b");
+        config.enableSystemPrompt = true;
+        config.systemPrompt = QStringLiteral("Line one\n\n    indented code\nlast");
+        QString error = QStringLiteral("stale");
+        const QString built = ModelfileBuilder::build(config, &error);
+        check(error.isEmpty(), QStringLiteral("builder: valid config gives no error"));
+        checkEqual(OllamaCli::extractDirective(built, QStringLiteral("SYSTEM")),
+                   config.systemPrompt, QStringLiteral("builder: SYSTEM round trip is verbatim"));
+        OllamaCli::ModelParams params;
+        OllamaCli::applyModelfile(params, built);
+        checkEqual(params.systemPrompt, config.systemPrompt,
+                   QStringLiteral("applyModelfile: SYSTEM taken from the Modelfile"));
+
+        // `"""` inside a block would end it early: the build is refused.
+        config.systemPrompt = QStringLiteral("Example:\n\"\"\"\nPARAMETER temperature 2\n\"\"\"");
+        const QString broken = ModelfileBuilder::build(config, &error);
+        check(broken.isEmpty(), QStringLiteral("builder: SYSTEM with triple quotes refused"));
+        checkEqual(error, QStringLiteral("SYSTEM"), QStringLiteral("builder: error names SYSTEM"));
+
+        // A disabled SYSTEM is not written, so its content does not matter.
+        config.enableSystemPrompt = false;
+        check(!ModelfileBuilder::build(config, &error).isEmpty() && error.isEmpty(),
+              QStringLiteral("builder: disabled SYSTEM is not validated"));
+
+        config.templateStr = QStringLiteral("{{ .Prompt }} \"\"\"");
+        check(ModelfileBuilder::build(config, &error).isEmpty()
+                      && error == QLatin1String("TEMPLATE"),
+              QStringLiteral("builder: TEMPLATE with triple quotes refused"));
+    }
+
+    // B-8: blob FROM lines are recognised under any storage root.
+    checkEqual(OllamaCli::blobFromModelfile(full), QStringLiteral("/var/lib/ollama/blobs/sha256-abc"),
+               QStringLiteral("blob FROM: system install"));
+    checkEqual(OllamaCli::blobFromModelfile(
+                       QStringLiteral("# c\nFROM /home/u/.ollama/models/blobs/sha256-0f\nPARAMETER a 1\n")),
+               QStringLiteral("/home/u/.ollama/models/blobs/sha256-0f"),
+               QStringLiteral("blob FROM: user install"));
+    checkEqual(OllamaCli::blobFromModelfile(QStringLiteral("FROM qwen3:8b\n")), QString(),
+               QStringLiteral("blob FROM: model reference is not a blob"));
+    checkEqual(OllamaCli::modelsDirFromBlob(QStringLiteral("/srv/models/blobs/sha256-ab")),
+               QStringLiteral("/srv/models"), QStringLiteral("models dir from blob path"));
+    checkEqual(OllamaCli::modelsDirFromBlob(QString()), QString(),
+               QStringLiteral("models dir: empty blob"));
 
     QTextStream(stdout) << (g_failures == 0 ? "ALL OK\n"
                                             : "FAILURES: " + QString::number(g_failures) + "\n");

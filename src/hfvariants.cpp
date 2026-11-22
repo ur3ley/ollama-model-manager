@@ -226,10 +226,13 @@ QString splitWildcardPattern(const QString &firstFileName)
 {
     const QString name = QFileInfo(firstFileName).fileName();
     static const QRegularExpression re(
-            QStringLiteral("^(.*)-\\d{5}-of-\\d{5}\\.gguf$"),
+            QStringLiteral("^(.*)-\\d{5}-(of-\\d{5}\\.gguf)$"),
             QRegularExpression::CaseInsensitiveOption);
     const QRegularExpressionMatch match = re.match(name);
     if (!match.hasMatch())
         return name;
-    return match.captured(1) + QStringLiteral("-*.gguf");
+    // `?????` + the exact series count: a leftover series with the same prefix
+    // (`…-MTP-00001-of-00004`) or another shard count never matches (B-13).
+    // The extension keeps its case — `*.gguf` missed `.GGUF` files.
+    return match.captured(1) + QStringLiteral("-\?\?\?\?\?-") + match.captured(2);
 }
